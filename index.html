@@ -30,6 +30,11 @@
   </section>
   <main class="workspace" aria-label="当前任务的讨论">
     <div class="discussion-heading"><h1>任务讨论</h1><span id="sync-state" role="status">同步中</span></div>
+    <div class="agent-picker">
+      <label class="sr-only" for="agents">当前讨论 agent</label><select id="agents" aria-label="当前讨论 agent"><option>讨论 agent</option></select>
+      <button type="button" id="add-agent" class="text-button">＋ 新增 agent</button>
+    </div>
+    <p id="agent-focus" class="agent-focus">共享当前 Codex 会话</p>
     <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions">
       <div id="empty" class="empty-detail"><span aria-hidden="true">“</span><h2>还没有讨论消息</h2><p>直接说说你对当前任务的想法。</p></div>
     </div>
@@ -43,6 +48,13 @@
       <div class="composer-actions"><button type="button" id="forward" class="text-button">把结论交给 Codex</button><button type="submit" id="send" class="primary">发送 ↑</button></div>
     </form>
   </main>
+  <dialog id="agent-dialog"><form id="agent-form">
+    <div class="dialog-heading"><h2>新增讨论 agent</h2><button type="button" data-close="agent-dialog" aria-label="关闭" class="text-button">×</button></div>
+    <p class="note">自动共享当前 Codex session 的内容，保留独立的讨论记录。</p>
+    <label for="agent-name">名称</label><input id="agent-name" required maxlength="40" autocomplete="off">
+    <label for="agent-instructions">关注方向 <span class="note">选填</span></label><textarea id="agent-instructions" rows="3" maxlength="1500" placeholder="例如：一起讨论方案中的取舍和风险"></textarea>
+    <button class="primary" type="submit" id="create-agent">创建 agent</button>
+  </form></dialog>
   <dialog id="forward-dialog"><form id="forward-form">
     <div class="dialog-heading"><h2>把结论交给 Codex</h2><button type="button" data-close="forward-dialog" aria-label="关闭" class="text-button">×</button></div>
     <p class="note">将这段内容提交给当前 Codex 任务，作为执行要求。</p>

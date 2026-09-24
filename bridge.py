@@ -18,9 +18,9 @@ def main():
     ack.add_argument('ids', nargs='+')
     args = parser.parse_args()
     if args.command == 'pending':
-        with urlopen(args.url + '/api/state?session=' + args.session, timeout=10) as response:
+        with urlopen(args.url + '/api/discussion?session=' + args.session, timeout=10) as response:
             state = json.load(response)
-        print(json.dumps([x for x in state['outbox'] if x['status'] == 'pending'], ensure_ascii=False, indent=2))
+        print(json.dumps(state['pending'], ensure_ascii=False, indent=2))
     else:
         data = {'session': args.session}
         data.update({'ack': args.ids} if args.command == 'ack' else {'text': args.text, 'status': args.status})

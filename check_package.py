@@ -6,7 +6,8 @@ import socket
 import subprocess
 import tempfile
 import time
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parent
 
@@ -62,6 +63,19 @@ with tempfile.TemporaryDirectory(prefix='talkwithagent-package-') as temporary:
             assert state['status'] == 'completed' and state['auto_discuss'] is False
             assert state['title'] == 'First', 'Reattachment without a title must preserve it'
             assert not state['busy'] and state['codex_thread'] is None
+            data = {'session': attached['session'], 'request_id': 'new-agent', 'name': 'Second agent', 'focus': ''}
+            with urlopen(Request(base + '/api/agents', json.dumps(data).encode(),
+                                 {'Content-Type': 'application/json', 'X-TalkWithAgent': '1'})) as response:
+                agent = json.load(response)
+            assert agent['id'] != attached['session'] and len(agent['agents']) == 2
+            with urlopen(base + '/api/state?session=' + attached['session'] + '&agent=' + agent['id']) as response:
+                assert json.load(response)['agent_name'] == 'Second agent'
+            try:
+                urlopen(base + '/api/state?session=' + other['session'] + '&agent=' + agent['id'])
+            except HTTPError as error:
+                assert error.code == 404
+            else:
+                raise AssertionError('Agent selection must stay inside its bound session')
             with urlopen(base + '/api/state?session=' + other['session']) as response:
                 assert json.load(response)['status'] == 'working'
             for route in ('/', '/app.js', '/style.css'):

@@ -4,11 +4,25 @@ const escape = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'
 const prefix = 'talkwithagent-';
 // Only this tab's URL determines its task. Never pick another task from storage.
 const session = new URL(location.href).searchParams.get('session');
+let activeAgent = new URL(location.href).searchParams.get('agent') || localStorage.getItem(prefix+'agent-'+session) || session;
 let state, replyTo = null, locked = false, version = -1, toastTimer;
 const time = v => new Date(v * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
 const kindName = {question:'问题',suggestion:'建议',decision:'需要决定'};
-const draftKey = () => prefix+'draft-'+session;
+const draftKey = () => prefix+'draft-'+session+(activeAgent===session?'':'-'+activeAgent);
 function saveDraft() { localStorage.setItem(draftKey(),JSON.stringify({text:$('#input').value,replyTo})); }
+function loadDraft() {
+  let draft;try{draft=JSON.parse(localStorage.getItem(draftKey())||'{}');}catch{}
+  $('#input').value=draft?.text||'';replyTo=draft?.replyTo||null;
+}
+async function selectAgent(id, next) {
+  saveDraft();activeAgent=id;version=-1;state=null;loadDraft();
+  localStorage.setItem(prefix+'agent-'+session,id);
+  const url=new URL(location.href);url.searchParams.set('agent',id);history.replaceState(null,'',url);
+  $('#messages').querySelectorAll('[data-id]').forEach(n=>n.remove());
+  $('#empty').hidden=false;$('#send').disabled=true;
+  try{render(next||await api('/api/state?session='+encodeURIComponent(session)+'&agent='+encodeURIComponent(id)));}
+  catch(e){toast(e.message);}
+}
 function toast(text) {
   $('#toast').textContent=text;$('#toast').hidden=false;
   clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,4500);
@@ -34,11 +48,13 @@ function cardHTML(card) {
     actions=options.map(v=>'<button data-card="'+escape(card.id)+'" data-option="'+escape(v)+'">'+escape(v)+'</button>').join('');
     actions+='<button data-card="'+escape(card.id)+'" data-reply="true">补充回复</button><button class="quiet-option" data-card="'+escape(card.id)+'" data-later="true">稍后再聊</button>';
   } else actions='<small>已回答：'+escape(card.answer)+' · '+(card.delivery==='received'?'Codex 已读取':'等待 Codex 读取')+'</small>';
-  return '<div class="message-label"><strong>讨论 agent</strong><span>'+kindName[card.kind]+'</span><time>'+time(card.created)+'</time></div><h2 class="card-title">'+escape(card.title)+'</h2><div class="message-body">'+escape(card.description)+'</div><div class="card-options">'+actions+'</div>';
+  return '<div class="message-label"><strong>'+escape(state.agent_name||'讨论 agent')+'</strong><span>'+kindName[card.kind]+'</span><time>'+time(card.created)+'</time></div><h2 class="card-title">'+escape(card.title)+'</h2><div class="message-body">'+escape(card.description)+'</div><div class="card-options">'+actions+'</div>';
 }
 function render(next) {
-  if(next.id!==session||next.version<version)return;
+  if(next.id!==activeAgent||next.version<version)return;
   $('#connection').textContent='已连接';
+  const options=(next.agents||[]).map(a=>'<option value="'+escape(a.id)+'" '+(a.id===activeAgent?'selected':'')+'>'+escape(a.name)+(a.busy?' · 思考中':a.queued?' · 等待回复':'')+'</option>').join('');
+  if($('#agents').dataset.options!==options){$('#agents').innerHTML=options;$('#agents').dataset.options=options;}
   if(version===next.version)return;
   state=next;version=state.version;
   $('.brand').href='/?session='+encodeURIComponent(session);
@@ -48,6 +64,8 @@ function render(next) {
   $('#task-update').textContent=mainMessages.filter(m=>m.role==='assistant').at(-1)?.text||state.events.filter(e=>e.kind==='progress'&&!e.archived).at(-1)?.text||'等待任务进展';
   $('#main-id').textContent=state.main_thread||'未绑定';
   $('#discussion-id').textContent=state.codex_thread||'首次回复时建立';
+  $('#agent-focus').textContent=state.agent_focus||'共享当前 Codex 会话';
+  $('#agent-focus').title=state.agent_focus||'';
   $('#sync-state').textContent=state.context_error?'同步中断':state.context_synced_at?'会话已同步 · '+time(state.context_synced_at):'正在同步会话';
   $('#sync-detail').textContent=state.context_error||(state.context_synced_at?'已同步 '+mainMessages.length+' 条用户消息与 agent 可见回复。'+(state.main_context.truncated?'较早内容已截断。':''):'正在读取绑定的 Codex 会话。');
   $('#agent-state').textContent=state.busy?'agent 正在思考…':state.jobs?.length?'消息已保存，等待回复':state.auto_discuss===false?'随时可以继续讨论':'agent 正在关注当前任务';
@@ -59,7 +77,7 @@ function render(next) {
   const ids=new Set(cards.map(c=>c.id));
   const entries=[...cards.filter(c=>c.owner==='agent').map(c=>({id:c.id,time:c.created,role:'assistant',html:cardHTML(c)})),
     ...state.messages.filter(m=>!m.archived&&(!m.topic_id||ids.has(m.topic_id))).map(m=>({...m,
-      html:['system','error'].includes(m.role)?escape(m.text):'<div class="message-label"><strong>'+(m.role==='user'?'你':'讨论 agent')+'</strong><time>'+time(m.time)+'</time></div><div class="message-body">'+escape(m.text)+'</div>'}))].sort((a,b)=>a.time-b.time);
+      html:['system','error'].includes(m.role)?escape(m.text):'<div class="message-label"><strong>'+(m.role==='user'?'你':escape(state.agent_name||'讨论 agent'))+'</strong><time>'+time(m.time)+'</time></div><div class="message-body">'+escape(m.text)+'</div>'}))].sort((a,b)=>a.time-b.time);
   const list=$('#messages'),atBottom=list.scrollHeight-list.scrollTop-list.clientHeight<90;
   const existing=new Map([...list.querySelectorAll('[data-id]')].map(n=>[n.dataset.id,n]));
   const active=new Set(entries.map(e=>e.id));
@@ -76,18 +94,32 @@ function render(next) {
   const last=state.outbox.filter(m=>!m.archived&&(!m.topic_id||ids.has(m.topic_id))).at(-1);
   $('#delivery').textContent=last?(last.status==='received'?'✓ Codex 已读取你提交的内容':'已提交 · 等待 Codex 读取'):'';
 }
-async function act(payload) {
+async function act(payload, path='/api/action') {
   if(locked||!session)return false;
   locked=true;$('#send').disabled=true;
-  const key=prefix+'retry-'+session;
+  $('#agents').disabled=true;$('#create-agent').disabled=true;$('#add-agent').disabled=true;
+  const key=prefix+'retry-'+activeAgent+'-'+path;
   let previous;try{previous=JSON.parse(localStorage.getItem(key)||'null');}catch{}
   const signature=JSON.stringify(payload);
-  const request=previous?.signature===signature?previous.request:{...payload,session,request_id:crypto.randomUUID()};
+  const request=previous?.signature===signature?previous.request:{...payload,session:activeAgent,request_id:crypto.randomUUID()};
   localStorage.setItem(key,JSON.stringify({signature,request}));
-  try{const result=await api('/api/action',request);localStorage.removeItem(key);render(result);return true;}
+  try{const result=await api(path,request);localStorage.removeItem(key);
+    if(path==='/api/agents')await selectAgent(result.id,result);else render(result);
+    return true;}
   catch(e){toast(e.message);return false;}
-  finally{locked=false;$('#send').disabled=!state?.main_thread;}
+  finally{locked=false;$('#send').disabled=!state?.main_thread;$('#agents').disabled=false;$('#create-agent').disabled=false;$('#add-agent').disabled=false;}
 }
+$('#agents').onchange=e=>{if(!locked)selectAgent(e.target.value);};
+$('#add-agent').onclick=()=>{
+  if(!state)return;
+  let count=2;const names=new Set(state.agents.map(a=>a.name));while(names.has('讨论 agent '+count))count++;
+  $('#agent-name').value='讨论 agent '+count;$('#agent-instructions').value='';
+  $('#agent-dialog').showModal();$('#agent-name').focus();
+};
+$('#agent-form').onsubmit=async e=>{
+  e.preventDefault();
+  if(await act({name:$('#agent-name').value.trim(),focus:$('#agent-instructions').value.trim()},'/api/agents'))$('#agent-dialog').close();
+};
 $('#composer').onsubmit=async e=>{
   e.preventDefault();const text=$('#input').value.trim();if(!text)return;
   const card=state?.cards.find(c=>c.id===replyTo);
@@ -117,15 +149,15 @@ document.addEventListener('click',async e=>{
   }
 });
 async function poll(){
-  try{render(await api('/api/state?session='+encodeURIComponent(session)));}
+  try{render(await api('/api/state?session='+encodeURIComponent(session)+'&agent='+encodeURIComponent(activeAgent)));}
   catch(e){$('#connection').textContent='连接中断';$('#agent-error').hidden=false;$('#agent-error').textContent=e.message;}
   finally{setTimeout(poll,1200);}
 }
 if(session){
-  try{const draft=JSON.parse(localStorage.getItem(draftKey())||'{}');$('#input').value=draft.text||'';replyTo=draft.replyTo||null;}catch{}
+  loadDraft();
   poll();
 } else {
   $('#task-name').textContent='尚未关联 Codex 会话';$('#connection').textContent='未关联';$('#sync-state').textContent='';
   $('#agent-state').textContent='在要讨论的 Codex 任务中使用 $talkwithagent，然后打开返回的链接。';
-  $('#input').disabled=true;$('#send').disabled=true;$('#forward').disabled=true;
+  $('#input').disabled=true;$('#send').disabled=true;$('#forward').disabled=true;$('#agents').disabled=true;$('#add-agent').disabled=true;
 }

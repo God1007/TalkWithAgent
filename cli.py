@@ -68,14 +68,11 @@ def main(argv=None):
             result = {'session': state['id'], 'url': f'http://127.0.0.1:{config["port"]}/?session={state["id"]}'}
         elif args.command in ('discussion', 'pending'):
             from urllib.parse import urlencode
-            state = request(config, '/api/state?' + urlencode({'session': args.session}))
+            state = request(config, '/api/discussion?' + urlencode({'session': args.session}))
             if args.command == 'pending':
-                result = [x for x in state['outbox'] if x['status'] == 'pending']
+                result = state['pending']
             else:
-                cards = [c for c in state['cards'] if not c.get('archived')]
-                ids = {c['id'] for c in cards}
-                result = {'cards': cards, 'messages': [m for m in state['messages'] if not m.get('archived')
-                          and (not m.get('topic_id') or m['topic_id'] in ids)][-30:]}
+                result = {'cards': state['cards'], 'messages': state['messages']}
         else:
             data = {'session': args.session}
             data.update({'ack': args.ids} if args.command == 'ack' else {'text': args.text, 'status': args.status})

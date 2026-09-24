@@ -44,6 +44,7 @@ def fresh(main_thread=''):
              'agent_error': '', 'last_review': None,
              'main_context': None, 'context_synced_at': None, 'context_error': ''}
     event(state, '等待 Codex 同步任务进展。' if main_thread else '等待关联 Codex 任务。')
+    state.update(group_id=state['id'], agent_name='讨论 agent', agent_focus='')
     return state
 
 
@@ -95,7 +96,11 @@ class Store:
             row = db.execute('SELECT body FROM sessions WHERE id=?', (sid,)).fetchone()
         if not row:
             raise ValueError('找不到这个会话')
-        return json.loads(row[0])
+        state = json.loads(row[0])
+        state.setdefault('group_id', state['id'])
+        state.setdefault('agent_name', '讨论 agent')
+        state.setdefault('agent_focus', '')
+        return state
 
     def all(self):
         with sqlite3.connect(self.path) as db:
@@ -124,10 +129,57 @@ class Store:
             existing = next((s for s in reversed(self.all()) if s['main_thread'] == main_thread), None)
             if existing:
                 if title:
-                    existing['title'] = title.strip()
-                    self.save(existing)
-                return existing
+                    for member in self.agents(existing['id']):
+                        member['title'] = title.strip()
+                        self.save(member)
+                return self.get(existing['id'])
             return self.create(main_thread, title.strip() if title else None)
+
+    def agents(self, sid):
+        state = self.get(sid)
+        return [s for s in reversed(self.all()) if s.get('group_id', s['id']) == state['group_id']]
+
+    def add_agent(self, sid, data):
+        with self.lock:
+            parent = self.get(sid)
+            if not parent['main_thread']:
+                raise ValueError('请先关联 Codex 会话')
+            rid, name, focus = data.get('request_id'), data.get('name'), data.get('focus', '')
+            if not isinstance(rid, str) or not 1 <= len(rid) <= 100:
+                raise ValueError('缺少有效请求编号')
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40:
+                raise ValueError('agent 名称需要 1–40 字')
+            if not isinstance(focus, str) or len(focus) > 1500:
+                raise ValueError('关注方向不能超过 1500 字')
+            members = self.agents(sid)
+            existing = next((s for s in members if s.get('creation_request') == rid), None)
+            if existing:
+                return self.get(existing['id'])
+            if any(s.get('agent_name', '讨论 agent') == name.strip() for s in members):
+                raise ValueError('这个名称已被使用，请换一个名称')
+            state = fresh(parent['main_thread'])
+            for key in ('title', 'status', 'events', 'main_context', 'context_synced_at', 'context_error',
+                        'input_revision', 'review_after'):
+                if key in parent:
+                    state[key] = parent[key]
+            state.update(group_id=parent['group_id'], agent_name=name.strip(), agent_focus=focus.strip(),
+                         creation_request=rid)
+            self.save(state)
+            return state
+
+    def shared_discussion(self, sid):
+        result = {'cards': [], 'messages': [], 'pending': []}
+        for state in self.agents(sid):
+            tag = {'agent_id': state['id'], 'agent_name': state.get('agent_name', '讨论 agent')}
+            cards = [c for c in state['cards'] if not c.get('archived')]
+            ids = {c['id'] for c in cards}
+            result['cards'].extend({**c, **tag} for c in cards)
+            result['messages'].extend({**m, **tag} for m in state['messages'] if not m.get('archived')
+                                      and (not m.get('topic_id') or m['topic_id'] in ids))
+            result['pending'].extend({**m, **tag} for m in state['outbox']
+                                     if m['status'] == 'pending' and not m.get('archived'))
+        result['messages'].sort(key=lambda m: m['time'])
+        return result
 
     def recover(self):
         with self.lock:
@@ -250,13 +302,15 @@ class Store:
             ack = data.get('ack', [])
             if not isinstance(ack, list) or any(not isinstance(x, str) for x in ack):
                 raise ValueError('无效回执')
-            for item in state['outbox']:
-                if item['id'] in ack:
-                    item['status'] = 'received'
-            for card in state['cards']:
-                if card.get('receipt_id') in ack:
-                    card['delivery'] = 'received'
-            self.save(state)
+            for member in self.agents(sid):
+                for item in member['outbox']:
+                    if item['id'] in ack:
+                        item['status'] = 'received'
+                for card in member['cards']:
+                    if card.get('receipt_id') in ack:
+                        card['delivery'] = 'received'
+                if ack:
+                    self.save(member)
             for sibling in self.all():
                 if sibling['main_thread'] != state['main_thread']:
                     continue
@@ -343,6 +397,7 @@ def discussion_context(snapshot):
     messages = [m for m in snapshot['messages'] if not m.get('archived')
                 and (not m.get('topic_id') or m['topic_id'] in topic_ids)]
     return {'task': snapshot['title'], 'main_status': snapshot['status'], 'trigger': snapshot['active_job'],
+            'agent': {'name': snapshot.get('agent_name', '讨论 agent'), 'focus': snapshot.get('agent_focus', '')},
             'main_session': snapshot.get('main_context'),
             'request': next((m for m in messages if m['id'] == snapshot['active_job'].get('message_id')), None),
             'topics': topics, 'updates': [e for e in snapshot['events'] if not e.get('archived')][-10:],
@@ -356,6 +411,8 @@ def discuss(store, snapshot):
         context = {**discussion_context(snapshot), 'auto_discuss': store.settings['auto_discuss']}
         prompt = (
             '你是绑定当前 Codex session 的 TalkWithAgent 讨论 agent，和用户持续讨论同一项任务。'
+            'agent.name 是你的名称，agent.focus 是用户设定的关注方向；为空时正常讨论当前任务。'
+            '同一主会话可以有多个讨论 agent，你只接续自己的讨论记录，不冒充其他 agent。'
             '你只讨论，不执行代码、不调用工具、不访问文件或网络。执行留在原生 Codex，'
             'main_session 是绑定会话自动同步的用户消息、agent 可见回复和进展；不包含工具原文或隐藏推理。'
             '优先结合主会话已有信息，不让用户重复介绍任务或先创建话题；truncated=true 表示较早内容已截断。'
@@ -454,7 +511,10 @@ class Handler(BaseHTTPRequestHandler):
     def send(self, code, value, content_type='application/json; charset=utf-8'):
         if isinstance(value, dict) and 'main_thread' in value:
             value = {**value, 'codex_available': bool(CODEX),
-                     'auto_discuss': self.server.store.settings['auto_discuss']}
+                     'auto_discuss': self.server.store.settings['auto_discuss'],
+                     'agents': [{'id': s['id'], 'name': s.get('agent_name', '讨论 agent'),
+                                 'busy': s['busy'], 'queued': len(s['jobs'])}
+                                for s in self.server.store.agents(value['id'])]}
         body = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header('Content-Type', content_type)
@@ -481,11 +541,15 @@ class Handler(BaseHTTPRequestHandler):
             name, mime = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'),
                           '/style.css': ('style.css', 'text/css')}[parsed.path]
             return self.send(200, (ROOT / name).read_bytes(), mime + '; charset=utf-8')
-        if parsed.path == '/api/state':
+        if parsed.path in ('/api/state', '/api/discussion'):
             try:
-                state = self.server.store.get(parse_qs(parsed.query).get('session', [''])[0])
-                state['codex_available'] = bool(CODEX)
-                state['auto_discuss'] = self.server.store.settings['auto_discuss']
+                params = parse_qs(parsed.query)
+                sid = params.get('session', [''])[0]
+                if parsed.path == '/api/discussion':
+                    return self.send(200, self.server.store.shared_discussion(sid))
+                state = self.server.store.get(params.get('agent', [sid])[0])
+                if state['group_id'] != self.server.store.get(sid)['group_id']:
+                    raise ValueError('这个 agent 不属于当前会话')
                 return self.send(200, state)
             except ValueError as error:
                 return self.send(404, {'error': str(error)})
@@ -508,6 +572,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {'error': '请通过 attach 关联当前 Codex 任务'})
             if self.path == '/api/attach':
                 return self.send(200, self.server.store.attach(data.get('main_thread'), data.get('title')))
+            if self.path == '/api/agents':
+                return self.send(200, self.server.store.add_agent(data.get('session'), data))
             if self.path == '/api/action':
                 return self.send(200, self.server.store.action(data.get('session'), data))
             if self.path == '/api/bridge':

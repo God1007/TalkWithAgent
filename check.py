@@ -235,4 +235,50 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
     store.action(a['id'], {'type': 'forward', 'text': '使用本地数据库', 'request_id': 'forward-direct'})
     assert store.get(a['id'])['outbox'][-1]['text'] == '使用本地数据库'
     assert not store.get(b['id'])['outbox']
-print('PASS: shared session context, direct discussion, isolation, proactive questions, handoff, retry and persistence')
+with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
+    store = Store(directory, settings={'auto_discuss': False})
+    first = store.attach('shared-main', 'Shared task')['id']
+    other = store.attach('other-main', 'Unrelated task')['id']
+    context = {'thread_id': 'shared-main', 'messages': [{'id': 'requirement', 'role': 'user',
+               'text': '只保存在本地'}], 'truncated': False}
+    store.sync_context(first, context)
+    store.action(first, {'type': 'chat', 'request_id': 'first-chat', 'text': '这是第一个 agent 的私聊'})
+    creation = {'request_id': 'create-second', 'name': '方案顾问', 'focus': '讨论方案取舍'}
+    second = store.add_agent(first, creation)['id']
+    assert store.add_agent(first, creation)['id'] == second, 'Retries must not create extra agents'
+    assert store.attach('shared-main', None)['id'] == first
+    assert len(store.agents(first)) == len(store.agents(second)) == 2
+    store.attach('shared-main', 'Updated task title')
+    assert store.get(second)['title'] == 'Updated task title'
+    assert len(store.agents(other)) == 1
+    assert store.get(second)['main_context'] == context, 'New agents inherit the bound session context'
+    assert not store.get(second)['messages'] and store.get(second)['codex_thread'] is None
+    store.action(second, {'type': 'chat', 'request_id': 'second-chat', 'text': '主任务有什么约束？'})
+    one, two = store.claim(first), store.claim(second)
+    assert one and two, 'Agents can be thinking concurrently'
+    second_context = discussion_context(two)
+    assert second_context['main_session'] == context and second_context['agent']['focus'] == '讨论方案取舍'
+    assert all('私聊' not in m['text'] for m in second_context['messages'])
+    store.finish(first, one['active_job'], {'reply': '第一份回复', 'topics': []}, 'thread-one')
+    store.finish(second, two['active_job'], {'reply': '第二份回复', 'topics': []}, 'thread-two')
+    assert store.get(first)['codex_thread'] != store.get(second)['codex_thread']
+    store.action(second, {'type': 'forward', 'request_id': 'second-feedback', 'text': '采用本地方案'})
+    feedback = store.shared_discussion(first)
+    assert feedback['pending'][0]['agent_id'] == second
+    assert feedback['pending'][0]['agent_name'] == '方案顾问'
+    assert {m['agent_id'] for m in feedback['messages']} == {first, second}
+    assert not store.shared_discussion(other)['messages']
+    store.bridge(first, {'ack': ['second-feedback'], 'text': '已采用本地方案', 'status': 'completed'})
+    assert not store.shared_discussion(first)['pending'], 'Primary task acknowledges every agent feedback'
+    assert store.get(second)['status'] == 'completed' and store.get(other)['status'] == 'working'
+    store = Store(directory)
+    store.recover()
+    assert store.get(second)['codex_thread'] == 'thread-two' and len(store.agents(first)) == 2
+    for bad in [{'name': ''}, {'name': 'x' * 41}, {'name': '方案顾问'}, {'focus': []}, {'request_id': ''}]:
+        try:
+            store.add_agent(first, {**creation, 'name': '新 agent', 'request_id': 'invalid', **bad})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid or duplicate agent configuration must be rejected')
+print('PASS: multiple persistent agents, shared main context, isolated chat, concurrent queues, aggregate feedback and configuration')

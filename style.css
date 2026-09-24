@@ -1,12 +1,12 @@
 :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; color: #26352f; background: #fff; --muted: #728078; --line: #e5eae5; --green: #2c5546; }
 * { box-sizing: border-box; }
 body { margin: 0; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button { cursor: pointer; border: 0; background: none; color: inherit; }
 button:disabled { cursor: default; opacity: .5; }
 a { color: inherit; text-decoration: none; }
 [hidden] { display: none !important; }
-button:focus-visible, summary:focus-visible, a:focus-visible, textarea:focus-visible { outline: 2px solid #71947c; outline-offset: 3px; }
+button:focus-visible, summary:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #71947c; outline-offset: 3px; }
 .topbar { height: 68px; padding: 0 30px; display: flex; align-items: center; gap: 22px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 650; letter-spacing: -.7px; white-space: nowrap; }
 .mark { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 8px; background: var(--green); color: #edf3e8; font-size: 17px; }
@@ -29,6 +29,10 @@ summary { cursor: pointer; }
 .discussion-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 h1 { font-size: 17px; font-weight: 600; margin: 0; }
 .discussion-heading span { font-size: 11px; color: var(--muted); }
+.agent-picker { display: flex; gap: 16px; align-items: center; padding-top: 12px; flex-shrink: 0; }
+.agent-picker select { flex: 1; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 7px; color: inherit; background: #f7f9f5; font-size: 13px; }
+.agent-picker button { white-space: nowrap; }
+.agent-focus { font-size: 11px; color: var(--muted); margin: 8px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
 h2 { font-size: 20px; font-weight: 550; line-height: 1.6; margin: 0; }
 .messages { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 4px 8px 0; scrollbar-width: thin; }
 .message { margin-bottom: 24px; }
@@ -67,6 +71,7 @@ dialog::backdrop { background: #1b362a55; backdrop-filter: blur(2px); }
 .dialog-heading button { font-size: 22px; }
 dialog label { display: block; font-size: 13px; margin: 15px 0 8px; }
 dialog textarea { border: 1px solid #dbe4d2; border-radius: 7px; padding: 10px; min-height: 100px; margin-bottom: 14px; }
+dialog input { width: 100%; border: 1px solid #dbe4d2; border-radius: 7px; padding: 10px; color: inherit; }
 .note { font-size: 12px; line-height: 1.8; color: var(--muted); }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: #294935; color: #fff; padding: 12px 19px; border-radius: 9px; font-size: 13px; max-width: 90vw; z-index: 8; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }

@@ -68,7 +68,9 @@ talkwithagent start --data-dir /absolute/path/to/existing-data
 
 ## 关联与同步
 
-每个 Codex 任务关联一份持久讨论；重复关联会返回同一个 session 和网页链接。
+每个 Codex 任务关联一个网页 session；重复关联返回同一个 session 和链接。网页内可点击「＋ 新增 agent」添加多个讨论 agent，用下拉框切换，也可将各自带 `agent=` 的链接放在不同浏览器标签页中。
+
+所有 agent 自动共享同一个 Codex 主会话的可见文字和执行进展。每个 agent 有独立的持久 Codex thread、聊天记录、草稿和回复队列，可以同时回复；切换页面不会停止其他 agent。名称用于区分，关注方向可选，不需要重复介绍任务。已有讨论自动作为默认 agent 保留。服务的模型和主动提问配置适用于所有 agent。
 
 ```bash
 talkwithagent attach --main-thread <Codex-任务-ID> --title "当前任务名称"
@@ -85,7 +87,7 @@ talkwithagent publish --session <讨论-session-ID> "任务完成" --status comp
 
 agent 根据新进展判断是否需要提出问题和建议，直接插入连续对话。相同进展不重复触发，完成通知不触发追问。输入框始终可用，消息和草稿属于整个会话，思考期间可以继续输入。旧话题中的非归档消息仍保留在对话中。
 
-主 agent 用 `discussion` 读取网页讨论作为上下文，用 `pending` 读取已明确提交的执行反馈。普通聊天不等于执行授权。卡片回答、采纳结果和明确提交的结论进入反馈队列；执行端确认读取后显示“Codex 已读取”。`ack` 只表示已读取，不表示已经执行。
+主 agent 用 `discussion` 读取该 session 下所有 agent 的网页讨论，用 `pending` 读取它们已明确提交的执行反馈，输出带有 `agent_id` 和 `agent_name`。仍只需保存一个 session ID；`ack` 可统一确认各个 agent 的反馈。普通聊天不等于执行授权。卡片回答、采纳结果和明确提交的结论进入反馈队列；执行端确认读取后显示“Codex 已读取”。`ack` 只表示已读取，不表示已经执行。
 
 ## 集成边界
 
@@ -107,6 +109,6 @@ npm pack
 npm publish --access public
 ```
 
-`npm pack` 生成可分发的 `talkwithagent-0.2.0.tgz`。它包含命令、服务、网页、配置读取代码和 Codex 插件，不包含本地会话数据库。可以通过 `npm install -g /path/to/talkwithagent-0.2.0.tgz` 安装。
+`npm pack` 生成可分发的 `talkwithagent-0.3.0.tgz`。它包含命令、服务、网页、配置读取代码和 Codex 插件，不包含本地会话数据库。可以通过 `npm install -g /path/to/talkwithagent-0.3.0.tgz` 安装。
 
-`npm test` 检查共享上下文、无需话题的聊天、同步失败、队列重试、配置与多任务隔离。`check_package.py` 在临时目录实际打包、安装和启动服务，验证命令及静态资源，不调用模型。模型与浏览器的交互验证请使用独立数据目录。
+`npm test` 检查多个 agent 的共享主上下文、独立聊天、并发队列、持久化、反馈汇总、重试和配置。`check_package.py` 在临时目录实际打包、安装和启动服务，验证命令、创建/切换 agent、跨 session 隔离及静态资源，不调用模型。模型与浏览器的交互验证请使用独立数据目录。
