@@ -1,6 +1,6 @@
 {
   "name": "talkwithagent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Persistent web discussions alongside native Codex tasks.",
   "license": "UNLICENSED",
   "author": "God1007",
@@ -9,7 +9,7 @@
   "engines": {"node": ">=18"},
   "bin": {"talkwithagent": "bin/talkwithagent.mjs"},
   "files": [
-    "bin/", "cli.py", "settings.py", "server.py", "bridge.py", "discussion.schema.json",
+    "bin/", "cli.py", "settings.py", "server.py", "codex_context.py", "bridge.py", "discussion.schema.json",
     "index.html", "app.js", "style.css", "plugins/", ".agents/plugins/marketplace.json"
   ],
   "scripts": {

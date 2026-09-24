@@ -1,10 +1,10 @@
 # TalkWithAgent
 
-任务执行留在 Codex，讨论在网页中。你和 agent 都可以发起话题，在各自话题里交流，再把确定的结论交给执行端。
+任务执行留在 Codex，讨论在网页中。讨论 agent 绑定使用插件的 Codex session，自动读取该会话的用户消息、可见回复与进展；你和 agent 在同一条对话里交流，无需创建话题或重新介绍任务。
 
 ## 安装
 
-需要 Node.js 18+、Python 3.10+，以及已安装并登录的 Codex CLI（支持 `exec resume --output-schema`）。npm 包没有第三方运行时依赖，使用本机 Codex 登录。
+需要 Node.js 18+、Python 3.10+，以及已安装并登录的 Codex CLI（支持 `app-server` 的 `thread/read` 和 `exec resume --output-schema`）。npm 包没有第三方运行时依赖，使用本机 Codex 登录。
 
 目前可从 GitHub 安装；尚未发布到 npm 公共仓库：
 
@@ -41,8 +41,8 @@ npm 管理命令和网页服务，Codex 插件提供主任务的协作流程。�
 | `port` | 本地端口，1–65535；只监听 127.0.0.1 |
 | `data_dir` | 会话数据库目录；相对路径以配置文件所在目录为基准 |
 | `model` | 讨论模型名称；null 使用 Codex CLI 默认模型，不修改执行任务的模型 |
-| `auto_discuss` | 是否主动创建话题；关闭后仍可回复用户和在已有话题内追问 |
-| `max_open_topics` | agent 同时等待回应的话题上限，1–20 |
+| `auto_discuss` | 是否主动提出问题和建议；关闭后仍回复用户，仍同步主会话 |
+| `max_open_topics` | agent 同时等待回应的问题或建议上限，1–20；保留旧配置名称 |
 | `discussion_timeout` | 单次讨论调用超时秒数，10–600 |
 
 数据默认保存在 `~/.config/talkwithagent/data/`，不在 npm 安装目录或 npx 缓存中。更新 npm 包不会清空会话。配置变化在服务重启后生效。
@@ -73,6 +73,7 @@ talkwithagent start --data-dir /absolute/path/to/existing-data
 ```bash
 talkwithagent attach --main-thread <Codex-任务-ID> --title "当前任务名称"
 talkwithagent publish --session <讨论-session-ID> "已完成接口分析，正在实现页面"
+talkwithagent discussion --session <讨论-session-ID>
 talkwithagent pending --session <讨论-session-ID>
 talkwithagent ack --session <讨论-session-ID> <消息-ID>
 talkwithagent publish --session <讨论-session-ID> "任务完成" --status completed
@@ -80,13 +81,17 @@ talkwithagent publish --session <讨论-session-ID> "任务完成" --status comp
 
 如果运行环境提供 `CODEX_THREAD_ID`，`attach` 可以省略 `--main-thread`。网页 URL 的 `session=` 是讨论记录 ID，并非 Codex task/thread ID。
 
-agent 根据任务进展判断是否存在具体、值得回应的问题；相同进展不重复触发，完成通知不触发新话题。双方的话题共同显示，各自保留消息和草稿。思考期间可以继续输入，消息会持久化排队。
+服务约每 5 秒通过 [Codex App Server 的 thread/read](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming) 读取绑定会话，无需手动复制上下文。读取失败时保留记录、显示错误并等待恢复，避免在缺少主会话信息时回答。网页链接明确绑定一项任务；没有 session 参数时提示从 Codex 关联，不自动切到其他任务。
 
-普通聊天不进入执行队列。“采纳 / 不采纳”和明确提交的结论才回传；执行端确认读取后显示“Codex 已读取”。`ack` 只表示已读取，不表示已经执行。
+agent 根据新进展判断是否需要提出问题和建议，直接插入连续对话。相同进展不重复触发，完成通知不触发追问。输入框始终可用，消息和草稿属于整个会话，思考期间可以继续输入。旧话题中的非归档消息仍保留在对话中。
+
+主 agent 用 `discussion` 读取网页讨论作为上下文，用 `pending` 读取已明确提交的执行反馈。普通聊天不等于执行授权。卡片回答、采纳结果和明确提交的结论进入反馈队列；执行端确认读取后显示“Codex 已读取”。`ack` 只表示已读取，不表示已经执行。
 
 ## 集成边界
 
-同步由插件流程在检查点调用命令完成，不是自动订阅完整桌面历史。插件不会在 Codex 任务结束后自动唤醒执行端。`--main-thread` 只是关联标识。
+主会话到讨论 agent 的同步是自动轮询已持久化的可见文字，不是实时订阅桌面内存，也不包含隐藏推理、工具原文或图片。提供最近最多 120,000 字符，超出时明确标记截断。`publish` 用于补充执行摘要和声明 working / waiting / completed；不再是讨论上下文的唯一来源。
+
+网页到主 agent 的读取仍由插件在执行检查点完成，不会在 Codex 任务结束后自动唤醒执行端。数据只读取绑定的 task ID；讨论 agent 只接收该任务的上下文。
 
 讨论 agent 使用独立且持久化的 Codex thread，调用只读 sandbox；它不是桌面任务树中的原生子任务。只有执行端上报 `waiting` 才能生成决策话题，真正暂停与恢复依赖执行 agent 配合。
 
@@ -102,6 +107,6 @@ npm pack
 npm publish --access public
 ```
 
-`npm pack` 生成可分发的 `talkwithagent-0.1.0.tgz`。它包含命令、服务、网页、配置读取代码和 Codex 插件，不包含本地会话数据库。可以通过 `npm install -g /path/to/talkwithagent-0.1.0.tgz` 安装。
+`npm pack` 生成可分发的 `talkwithagent-0.2.0.tgz`。它包含命令、服务、网页、配置读取代码和 Codex 插件，不包含本地会话数据库。可以通过 `npm install -g /path/to/talkwithagent-0.2.0.tgz` 安装。
 
-`npm test` 检查话题、队列、配置优先级、关闭主动提问、多任务隔离和模型参数传递。`check_package.py` 在临时目录实际打包、安装和启动服务，验证命令及静态资源，不调用模型。模型与浏览器的交互验证请使用独立数据目录。
+`npm test` 检查共享上下文、无需话题的聊天、同步失败、队列重试、配置与多任务隔离。`check_package.py` 在临时目录实际打包、安装和启动服务，验证命令及静态资源，不调用模型。模型与浏览器的交互验证请使用独立数据目录。

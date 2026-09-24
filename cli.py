@@ -34,13 +34,13 @@ def main(argv=None):
     parser.add_argument('--version', action='version', version=json.loads((ROOT / 'package.json').read_text())['version'])
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('start', help='Start the local service (start --help for options)')
-    for name in ('init', 'config', 'attach', 'publish', 'pending', 'ack'):
+    for name in ('init', 'config', 'attach', 'publish', 'discussion', 'pending', 'ack'):
         command = commands.add_parser(name)
         command.add_argument('--config', help='Config file (or TALKWITHAGENT_CONFIG)')
         if name == 'attach':
             command.add_argument('--main-thread', default=os.environ.get('CODEX_THREAD_ID'))
             command.add_argument('--title')
-        if name in ('publish', 'pending', 'ack'):
+        if name in ('publish', 'discussion', 'pending', 'ack'):
             command.add_argument('--session', required=True)
         if name == 'publish':
             command.add_argument('text')
@@ -66,10 +66,16 @@ def main(argv=None):
                 raise ValueError('请通过 --main-thread 提供当前 Codex 任务 ID')
             state = request(config, '/api/attach', {'main_thread': args.main_thread, 'title': args.title})
             result = {'session': state['id'], 'url': f'http://127.0.0.1:{config["port"]}/?session={state["id"]}'}
-        elif args.command == 'pending':
+        elif args.command in ('discussion', 'pending'):
             from urllib.parse import urlencode
             state = request(config, '/api/state?' + urlencode({'session': args.session}))
-            result = [x for x in state['outbox'] if x['status'] == 'pending']
+            if args.command == 'pending':
+                result = [x for x in state['outbox'] if x['status'] == 'pending']
+            else:
+                cards = [c for c in state['cards'] if not c.get('archived')]
+                ids = {c['id'] for c in cards}
+                result = {'cards': cards, 'messages': [m for m in state['messages'] if not m.get('archived')
+                          and (not m.get('topic_id') or m['topic_id'] in ids)][-30:]}
         else:
             data = {'session': args.session}
             data.update({'ack': args.ids} if args.command == 'ack' else {'text': args.text, 'status': args.status})

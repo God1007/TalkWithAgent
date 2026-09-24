@@ -1,6 +1,6 @@
 {
   "name": "talkwithagent",
-  "version": "0.1.0",
+  "version": "0.2.0+codex.20260924084346",
   "description": "Keep Codex task execution connected to persistent web discussions.",
   "author": {
     "name": "God1007"
@@ -11,7 +11,7 @@
   "interface": {
     "displayName": "TalkWithAgent",
     "shortDescription": "Discuss tasks in the web while Codex executes.",
-    "longDescription": "Connect a Codex task to TalkWithAgent, publish progress, and collect confirmed feedback at checkpoints. Requires the TalkWithAgent npm command, Python 3.10+, and a signed-in Codex CLI.",
+    "longDescription": "Bind a Codex session to a continuous web discussion with automatically synchronized visible context. Read discussion and confirmed feedback at checkpoints. Requires the TalkWithAgent npm command, Python 3.10+, and a signed-in Codex CLI.",
     "developerName": "God1007",
     "category": "Productivity",
     "capabilities": [],

@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix='talkwithagent-package-') as temporary:
     files = {f['path'] for f in package['files']}
     assert '.agents/plugins/marketplace.json' in files
     assert 'plugins/talkwithagent/.codex-plugin/plugin.json' in files
-    assert 'settings.py' in files and 'discussion.schema.json' in files
+    assert 'settings.py' in files and 'discussion.schema.json' in files and 'codex_context.py' in files
     assert not any('.sqlite' in p or '.runtime/' in p for p in files)
     run('npm', 'install', '--prefix', str(directory / 'installed'), '--ignore-scripts',
         '--no-audit', '--no-fund', str(directory / package['filename']))
@@ -56,6 +56,7 @@ with tempfile.TemporaryDirectory(prefix='talkwithagent-package-') as temporary:
             assert f':{port}/?session=' in attached['url']
             run(*command, 'publish', '--session', attached['session'], 'Done', '--status', 'completed', env=env)
             assert json.loads(run(*command, 'pending', '--session', attached['session'], env=env)) == []
+            assert json.loads(run(*command, 'discussion', '--session', attached['session'], env=env)) == {'cards': [], 'messages': []}
             with urlopen(base + '/api/state?session=' + attached['session']) as response:
                 state = json.load(response)
             assert state['status'] == 'completed' and state['auto_discuss'] is False

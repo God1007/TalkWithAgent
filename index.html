@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>TalkWithAgent · 任务讨论</title>
-  <meta name="description" content="你和 agent 都能发起话题。讨论留在这里，执行交给 Codex。">
+  <meta name="description" content="与绑定当前 Codex 会话的 agent 持续讨论任务。">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232c5146'/%3E%3Cpath d='M7 9h18v11H15l-5 4v-4H7z' fill='%23e7f0df'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
@@ -13,56 +13,39 @@
   <header class="topbar">
     <a href="/" class="brand" aria-label="TalkWithAgent 首页"><span class="mark" aria-hidden="true">T</span>TalkWithAgent</a>
     <span id="connection" class="connection" role="status">连接中</span>
-    <button id="new-topic" class="primary">＋ 发起话题</button>
   </header>
   <section class="task-strip" aria-label="当前 Codex 任务">
     <span class="task-label">CODEX</span>
-    <strong id="task-name">正在恢复讨论</strong>
+    <strong id="task-name">正在连接任务</strong>
     <span id="task-status" class="pill"></span>
     <details id="task-details">
-      <summary>任务动态</summary>
+      <summary>会话信息</summary>
       <div class="details-content">
         <p id="task-update">等待任务进展</p>
-        <p class="note">讨论依据最近同步的任务进展。</p>
-        <small>主任务</small><code id="main-id"></code>
-        <small>讨论会话</small><code id="discussion-id">正在建立</code>
-        <label for="history">切换讨论记录</label><select id="history"></select>
+        <p id="sync-detail" class="note">正在同步会话</p>
+        <small>绑定的 Codex 会话</small><code id="main-id"></code>
+        <small>讨论 agent</small><code id="discussion-id"></code>
       </div>
     </details>
   </section>
-  <main class="workspace">
-    <aside class="topics-pane" aria-label="话题列表">
-      <div class="pane-heading"><h1>话题 <span id="topic-count">0</span></h1><span>你与 agent 共同发起</span></div>
-      <div class="filters" aria-label="筛选话题"><button data-filter="open" class="active" aria-pressed="true">进行中</button><button data-filter="all" aria-pressed="false">全部</button></div>
-      <div id="topics" class="topic-list"></div>
-      <div class="watcher"><span id="agent-light" aria-hidden="true"></span><div><strong id="agent-state">正在关注任务</strong><p id="agent-note">有值得讨论的新进展时，我会开启话题。</p></div></div>
-      <button id="retry" class="text-button" hidden>重新思考</button>
-    </aside>
-    <section id="detail" class="detail" aria-label="话题讨论">
-      <div id="no-topic" class="empty-detail"><span class="empty-symbol" aria-hidden="true">“</span><h2>从一个想法开始</h2><p>你可以提出想讨论的事。<br>有新的发现时，agent 也会来找你聊。</p><button id="empty-new" class="primary">发起一个话题</button></div>
-      <div id="topic-content" hidden>
-        <header class="topic-header"><button id="back" class="text-button">‹ 所有话题</button><div class="topic-meta" id="topic-meta"></div><h2 id="topic-title"></h2></header>
-        <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
-        <div id="thinking" role="status" class="thinking" hidden>agent 正在思考这个话题…</div>
-        <div id="delivery" class="delivery" role="status"></div>
-        <form id="composer" class="composer">
-          <label class="sr-only" for="input">回复当前话题</label>
-          <textarea id="input" rows="2" maxlength="6000" placeholder="继续追问，或说说你的想法…"></textarea>
-          <div class="composer-actions"><button type="button" id="forward" class="text-button">把结论交给 Codex</button><button type="submit" id="send" class="primary">回复 ↑</button></div>
-        </form>
-        <p class="composer-hint">确定后，可将结论交给 Codex。</p>
-      </div>
-    </section>
+  <main class="workspace" aria-label="当前任务的讨论">
+    <div class="discussion-heading"><h1>任务讨论</h1><span id="sync-state" role="status">同步中</span></div>
+    <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions">
+      <div id="empty" class="empty-detail"><span aria-hidden="true">“</span><h2>还没有讨论消息</h2><p>直接说说你对当前任务的想法。</p></div>
+    </div>
+    <div class="agent-status"><span id="agent-state" role="status">正在连接讨论 agent</span><button id="retry" class="text-button" hidden>重新思考</button></div>
+    <p id="agent-error" class="error-note" role="status" hidden></p>
+    <div id="delivery" class="delivery" role="status"></div>
+    <form id="composer" class="composer">
+      <div id="reply-context" class="reply-context" hidden><span id="reply-label"></span><button type="button" id="cancel-reply" aria-label="取消引用回复">×</button></div>
+      <label class="sr-only" for="input">讨论当前任务</label>
+      <textarea id="input" rows="2" maxlength="6000" placeholder="关于当前任务，说说你的想法…"></textarea>
+      <div class="composer-actions"><button type="button" id="forward" class="text-button">把结论交给 Codex</button><button type="submit" id="send" class="primary">发送 ↑</button></div>
+    </form>
   </main>
-  <dialog id="topic-dialog"><form id="topic-form">
-    <div class="dialog-heading"><h2>发起话题</h2><button type="button" data-close="topic-dialog" aria-label="关闭" class="text-button">×</button></div>
-    <label for="new-title">话题名称 <span class="note">选填</span></label><input id="new-title" maxlength="100" placeholder="给这个话题起个名字">
-    <label for="new-text">你想聊什么？</label><textarea id="new-text" rows="4" required maxlength="6000" placeholder="一个问题、建议，或还没想清楚的想法都可以。"></textarea>
-    <div class="dialog-actions"><span class="note">agent 会结合当前任务一起讨论。</span><button class="primary" type="submit">开启讨论</button></div>
-  </form></dialog>
   <dialog id="forward-dialog"><form id="forward-form">
     <div class="dialog-heading"><h2>把结论交给 Codex</h2><button type="button" data-close="forward-dialog" aria-label="关闭" class="text-button">×</button></div>
-    <p class="note">将这段内容提交给 Codex，作为执行要求。</p>
+    <p class="note">将这段内容提交给当前 Codex 任务，作为执行要求。</p>
     <label for="forward-text">明确的结论或回答</label><textarea id="forward-text" rows="4" required maxlength="6000"></textarea>
     <button class="primary" type="submit">确认并回传</button>
   </form></dialog>
