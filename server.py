@@ -30,12 +30,12 @@ def event(state, text, kind='progress'):
 
 
 def source(state):
-    return next((e for e in reversed(state['events']) if e['kind'] == 'progress'), None)
+    return next((e for e in reversed(state['events']) if e['kind'] == 'progress' and not e.get('archived')), None)
 
 
 def fresh(main_thread=''):
     state = {'id': str(uuid.uuid4()), 'version': 0, 'schema_version': 2,
-             'title': '讨论 agent 插件', 'created': time.time(), 'status': 'working',
+             'title': '当前任务', 'created': time.time(), 'status': 'working',
              'main_thread': main_thread, 'codex_thread': None, 'busy': False, 'active_job': None,
              'messages': [], 'events': [], 'receipts': {}, 'outbox': [], 'cards': [], 'jobs': [],
              'input_revision': 0, 'reviewed_revision': -1, 'review_after': 0,
@@ -103,8 +103,9 @@ class Store:
             state = fresh(self.main_thread)
             previous = next((s for s in self.all() if s['main_thread'] == self.main_thread), None)
             if previous:
+                state['title'] = previous['title']
                 state['status'] = previous['status']
-                state['events'] = [e for e in previous['events'] if e['kind'] == 'progress']
+                state['events'] = [e for e in previous['events'] if e['kind'] == 'progress' and not e.get('archived')]
             self.save(state)
             return state
 
@@ -178,7 +179,7 @@ class Store:
                     raise ValueError('请选择要回传的话题')
                 state['outbox'].append({'id': rid, 'topic_id': topic_id, 'text': value,
                                         'time': time.time(), 'status': 'pending'})
-                message(state, 'system', '结论已保存，等待 Codex 在检查点读取。', topic_id)
+                message(state, 'system', '已提交结论，等待 Codex 读取。', topic_id)
             elif kind == 'card':
                 card = next((c for c in state['cards'] if c['id'] == data.get('card_id')), None)
                 if not card or card.get('archived') or card['status'] not in ('pending', 'deferred'):
@@ -197,7 +198,7 @@ class Store:
                                             'text': f'{card["title"]} → {value}',
                                             'time': time.time(), 'status': 'pending'})
                     mid = message(state, 'user', value, card['id'])
-                    message(state, 'system', '已保存到回传队列，等待 Codex 读取。', card['id'])
+                    message(state, 'system', '已提交回复，等待 Codex 读取。', card['id'])
                     state['jobs'].append({'id': rid, 'topic_id': card['id'], 'message_id': mid, 'reason': 'feedback'})
             else:
                 raise ValueError('不支持的操作')
@@ -246,7 +247,8 @@ class Store:
                 return None
             if state['jobs']:
                 job = dict(state['jobs'][0])
-            elif state['input_revision'] > state['reviewed_revision'] and time.time() >= state['review_after']:
+            elif (state['status'] != 'completed' and state['input_revision'] > state['reviewed_revision']
+                  and time.time() >= state['review_after']):
                 job = {'id': str(uuid.uuid4()), 'topic_id': None, 'reason': 'progress'}
             else:
                 return None
@@ -277,7 +279,8 @@ class Store:
                 state.pop('failed_job', None)
                 if job.get('topic_id') and result['reply'].strip():
                     message(state, 'assistant', result['reply'], job['topic_id'])
-                if job['revision'] == state['input_revision']:
+                if (job['revision'] == state['input_revision']
+                        and (job['reason'] != 'progress' or state['status'] != 'completed')):
                     known_keys = {c.get('key') for c in state['cards']}
                     known_titles = {re.sub(r'\W+', '', c['title']) for c in state['cards']}
                     open_count = sum(c['status'] == 'pending' and c.get('owner') == 'agent'
@@ -300,14 +303,21 @@ class Store:
             self.save(state)
 
 
+def discussion_context(snapshot):
+    topics = [c for c in snapshot['cards'] if not c.get('archived')]
+    topic_ids = {c['id'] for c in topics}
+    messages = [m for m in snapshot['messages'] if m.get('topic_id') in topic_ids]
+    return {'task': snapshot['title'], 'main_status': snapshot['status'], 'trigger': snapshot['active_job'],
+            'request': next((m for m in messages if m['id'] == snapshot['active_job'].get('message_id')), None),
+            'topics': topics, 'updates': [e for e in snapshot['events'] if not e.get('archived')][-10:],
+            'messages': messages[-30:]}
+
+
 def discuss(store, snapshot):
     sid, job = snapshot['id'], snapshot['active_job']
     thread_id = snapshot['codex_thread']
     try:
-        context = {'task': snapshot['title'], 'main_status': snapshot['status'], 'trigger': job,
-                   'request': next((m for m in snapshot['messages'] if m['id'] == job.get('message_id')), None),
-                   'topics': [c for c in snapshot['cards'] if not c.get('archived')],
-                   'updates': snapshot['events'][-10:], 'messages': snapshot['messages'][-30:]}
+        context = discussion_context(snapshot)
         prompt = (
             '你是 TalkWithAgent 的讨论 agent，和用户是平等的讨论伙伴，双方都能主动发起话题。'
             '你只讨论，不执行代码、不调用工具、不访问文件或网络。执行留在原生 Codex，'
@@ -315,6 +325,13 @@ def discuss(store, snapshot):
             '输出符合给定 JSON schema。reply 是你对当前话题的简短中文回复；topics 是你主动发起的新话题。'
             'trigger.reason=progress 时，根据最新进展主动发现值得用户回应的取舍、建议或缺失信息，'
             '生成 0–2 个具体、简短的新话题，不等用户先说话；没有新的有价值问题就返回空 topics，避免骚扰。'
+            '每个主动话题必须对应当前任务中具体、尚未解决且用户回答能影响结果的问题。'
+            '进展只是报告完成、测试通过或提交代码时，不需要追问。不要据此让用户安排下一轮、'
+            '排列产品路线图，或验证 TalkWithAgent 自身是否可用；用户主动提出这些任务时才讨论。'
+            '不要为了展示双向对话能力而制造话题，也不要把开发联调、演示记录当作用户的真实需求。'
+            '直接聊任务本身，不用演示、验收、功能介绍的口吻，不反复附加“这里只讨论”、'
+            '“不会自动执行”、“不会启动下一轮”等说明；用户询问执行状态或存在具体误解时再澄清。'
+            '提供的上下文是当前有效记录；历史中已移除的话题和联调内容不再是待办，不要重新提出。'
             '用户明确要求已确定的事不要反问；已存在、已回答或稍后的话题不要重提。'
             'key 是稳定英文语义标识，同一问题始终用同一个 key。每个话题说明为何此时值得讨论，'
             'description 用自然对话表达，问题须明确提问，options 给 0–3 个短回答候选。'

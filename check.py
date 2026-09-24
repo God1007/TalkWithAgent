@@ -2,7 +2,7 @@
 """Run: python3 check.py. No network or model calls."""
 import tempfile
 from unittest.mock import patch
-from server import Store, validate_result
+from server import Store, validate_result, discussion_context, event, message, source
 
 def proposal(key='topic', kind='question'):
     return {'reply': '', 'topics': [{'key': key, 'kind': kind, 'title': key,
@@ -94,6 +94,30 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
     assert store.get(second)['messages'][0]['topic_id'] == 'previous-discussion'
     assert store.get(second)['messages'][0]['text'] == '旧对话'
 
+    clean = store.create()
+    clean['status'] = 'working'
+    event(clean, '正在实现订单导出，需要确定分文件方式')
+    latest = source(clean)
+    clean['cards'].append({'id': 'removed', 'title': '旧演示', 'status': 'pending', 'archived': True})
+    message(clean, 'user', '旧联调内容', 'removed')
+    event(clean, '旧演示进展')
+    clean['events'][-1]['archived'] = True
+    store.save(clean)
+    snapshot = store.claim(clean['id'])
+    context = discussion_context(snapshot)
+    assert snapshot['active_job']['source_id'] == latest['id']
+    assert not any(c['id'] == 'removed' for c in context['topics'])
+    assert not context['messages'], 'Archived topic messages must not leak into model context'
+    assert context['updates'][-1]['id'] == latest['id'], 'Archived progress must not seed new topics'
+    store.finish(clean['id'], snapshot['active_job'], {'reply': '', 'topics': []})
+    store.bridge(clean['id'], {'status': 'completed', 'text': '任务已完成'})
+    with patch('server.time.time', return_value=9999999999):
+        assert not store.claim(clean['id']), 'Completion must not trigger unsolicited next-iteration questions'
+    store.action(clean['id'], {'type': 'start_topic', 'text': '解释一下导出结果', 'request_id': 'after-completion'})
+    job = claim(store, clean['id'])
+    store.finish(clean['id'], job, {'reply': '可以继续讨论已经完成的工作。', 'topics': []})
+    assert store.get(clean['id'])['messages'][-1]['role'] == 'assistant', 'User discussions must still work after completion'
+
     for bad in [None, {'reply': '', 'topics': [{'kind': 'execute'}]}, proposal('../invalid')]:
         try:
             validate_result(bad)
@@ -101,4 +125,4 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
             pass
         else:
             raise AssertionError('Malformed model output must be rejected')
-print('PASS: two-way topics, proactive triggers, deduplication, stale output, explicit handoff, retries, persistence and migration')
+print('PASS: two-way topics, proactive triggers, completion silence, archived context isolation, deduplication, handoff, retries and persistence')

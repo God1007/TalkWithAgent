@@ -23,7 +23,7 @@
       <summary>任务动态</summary>
       <div class="details-content">
         <p id="task-update">等待任务进展</p>
-        <p class="note">主任务按检查点同步；收到新进展后，讨论 agent 会自动思考。</p>
+        <p class="note">讨论依据最近同步的任务进展。</p>
         <small>主任务</small><code id="main-id"></code>
         <small>讨论会话</small><code id="discussion-id">正在建立</code>
         <label for="history">切换讨论记录</label><select id="history"></select>
@@ -50,19 +50,19 @@
           <textarea id="input" rows="2" maxlength="6000" placeholder="继续追问，或说说你的想法…"></textarea>
           <div class="composer-actions"><button type="button" id="forward" class="text-button">把结论交给 Codex</button><button type="submit" id="send" class="primary">回复 ↑</button></div>
         </form>
-        <p class="composer-hint">回复是讨论；明确提交的结论才进入执行队列。</p>
+        <p class="composer-hint">确定后，可将结论交给 Codex。</p>
       </div>
     </section>
   </main>
   <dialog id="topic-dialog"><form id="topic-form">
     <div class="dialog-heading"><h2>发起话题</h2><button type="button" data-close="topic-dialog" aria-label="关闭" class="text-button">×</button></div>
-    <label for="new-title">话题名称 <span class="note">选填</span></label><input id="new-title" maxlength="100" placeholder="例如：讨论结果应该怎样同步？">
+    <label for="new-title">话题名称 <span class="note">选填</span></label><input id="new-title" maxlength="100" placeholder="给这个话题起个名字">
     <label for="new-text">你想聊什么？</label><textarea id="new-text" rows="4" required maxlength="6000" placeholder="一个问题、建议，或还没想清楚的想法都可以。"></textarea>
     <div class="dialog-actions"><span class="note">agent 会结合当前任务一起讨论。</span><button class="primary" type="submit">开启讨论</button></div>
   </form></dialog>
   <dialog id="forward-dialog"><form id="forward-form">
     <div class="dialog-heading"><h2>把结论交给 Codex</h2><button type="button" data-close="forward-dialog" aria-label="关闭" class="text-button">×</button></div>
-    <p class="note">确认这段内容可以作为执行要求。Codex 会在检查点读取，保存不代表已经执行。</p>
+    <p class="note">将这段内容提交给 Codex，作为执行要求。</p>
     <label for="forward-text">明确的结论或回答</label><textarea id="forward-text" rows="4" required maxlength="6000"></textarea>
     <button class="primary" type="submit">确认并回传</button>
   </form></dialog>

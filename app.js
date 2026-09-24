@@ -39,14 +39,14 @@ function render(next) {
   if(version===state.version)return;
   version=state.version;
   $('#task-name').textContent=state.title;
-  $('#task-status').textContent={working:'执行中',waiting:'等待决定',completed:'本轮完成'}[state.status];
-  const progress=state.events.filter(e=>e.kind==='progress').at(-1);
+  $('#task-status').textContent={working:'执行中',waiting:'等待决定',completed:'已完成'}[state.status];
+  const progress=state.events.filter(e=>e.kind==='progress'&&!e.archived).at(-1);
   $('#task-update').textContent=progress?.text||'尚无进展';
   $('#main-id').textContent=state.main_thread||'未绑定';
   $('#discussion-id').textContent=state.codex_thread||'首次思考时建立';
   const queued=state.jobs?.length>0;
-  $('#agent-state').textContent=state.codex_available===false?'讨论 agent 未连接':state.busy?'agent 正在思考':queued?'正在准备回复':state.agent_error?'讨论暂时中断':'正在关注任务';
-  $('#agent-note').textContent=state.codex_available===false?'请安装 Codex CLI 并登录，然后重新启动服务。':state.agent_error||(state.busy?'你仍可以发起话题或补充想法。':'有值得讨论的新进展时，我会开启话题。');
+  $('#agent-state').textContent=state.codex_available===false?'讨论 agent 未连接':state.busy?'agent 正在思考':queued?'正在准备回复':state.agent_error?'讨论暂时中断':state.status==='completed'?'随时可以继续讨论':'正在关注任务';
+  $('#agent-note').textContent=state.codex_available===false?'请安装 Codex CLI 并登录，然后重新启动服务。':state.agent_error||(state.busy?'你仍可以发起话题或补充想法。':state.status==='completed'?'已有话题和讨论记录会保留。':'有值得讨论的新进展时，我会开启话题。');
   $('#agent-light').classList.toggle('busy',state.busy);
   $('#retry').hidden=!state.agent_error;
   const visible=state.cards.filter(c=>!c.archived);
@@ -87,7 +87,7 @@ function renderDetail() {
       const options=topic.kind==='suggestion'?['采纳','不采纳']:(topic.options||[]);
       actions=options.map(v=>'<button '+(topic.kind==='suggestion'?'data-confirm':'data-option')+'="'+escape(v)+'">'+escape(v)+'</button>').join('');
       actions+='<button class="quiet-option" data-confirm="稍后">稍后再聊</button>';
-      if(topic.kind!=='suggestion')actions+='<small>选择会填入回复框，你可以补充后继续讨论，或明确回传。</small>';
+      if(topic.kind!=='suggestion')actions+='<small>选择后可以补充，再发送回复。</small>';
     } else actions='<small>已确认：'+escape(topic.answer)+'</small>';
     el.innerHTML='<div class="message-label"><strong>讨论 agent</strong><span>发起这个话题</span></div><div class="message-body">'+escape(topic.description)+'</div><div class="topic-options">'+actions+'</div>'+(topic.source_text?'<details class="topic-source"><summary>为什么现在聊这个</summary><p>'+escape(topic.source_text)+'</p></details>':'');
     if(opening)opening.replaceWith(el);else list.prepend(el);
@@ -106,7 +106,7 @@ function renderDetail() {
   $('#thinking').hidden=!running&&!queued;
   $('#thinking').textContent=running?'agent 正在思考这个话题…':'已排队，agent 会继续回应。';
   const last=state.outbox.filter(i=>i.topic_id===selected).at(-1);
-  $('#delivery').textContent=last?(last.status==='received'?'✓ Codex 已读取你提交的结论':'结论已保存 · 等待 Codex 在检查点读取'):'';
+  $('#delivery').textContent=last?(last.status==='received'?'✓ Codex 已读取你提交的结论':'结论已提交 · 等待 Codex 读取'):'';
 }
 async function act(payload) {
   if(locked)return null;
