@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sidecar · 任务讨论搭档</title>
+  <meta name="description" content="执行留在 Codex，在这里讨论、决定与补充。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23234035'/%3E%3Cpath d='M9 8v16M16 8v16M23 12v12' stroke='%23d6f4c4' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/" aria-label="Sidecar 首页"><span class="brand-mark" aria-hidden="true">Ⅲ</span>sidecar<span class="edition">DEMO</span></a><div class="top-actions"><span id="connection" role="status">正在连接</span><button id="new-session" class="quiet">新建讨论 <span aria-hidden="true">＋</span></button></div></header>
+  <main>
+    <section class="intro"><div><p class="eyebrow">YOUR TASK, IN CONVERSATION</p><h1>执行在 Codex，<span>思考在这里。</span></h1></div><button id="demo-card" class="text-button">体验决策卡 <span aria-hidden="true">↗</span></button></section>
+    <section class="task-bar" aria-label="绑定的 Codex 任务"><span class="task-icon" aria-hidden="true">⌘</span><div class="task-info"><strong id="task-name">正在恢复会话…</strong><span id="task-update">读取已保存的讨论</span></div><span id="task-status" class="pill">连接中</span><details class="session-details"><summary aria-label="查看会话关联详情">关联信息</summary><div><p>同步方式：执行 agent 在检查点上报与读取。网页不会自动接管 Codex。</p><small>主任务</small><code id="main-id">—</code><small>讨论会话</small><code id="discussion-id">首次对话时创建</code><small>本地记录</small><code id="session-id">—</code><label for="history">恢复已有讨论</label><select id="history"></select></div></details></section>
+    <nav class="mobile-tabs" aria-label="讨论视图"><button class="active" data-view="chat">讨论</button><button data-view="cards">待处理 <span id="tab-count">0</span></button></nav>
+    <div class="workspace" data-view="chat">
+      <section class="conversation" aria-label="与讨论 agent 对话">
+        <div class="section-head"><h2>讨论</h2><span id="agent-state">Codex · 持久会话</span></div>
+        <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+        <div id="thinking" class="thinking" hidden><span class="pulse"></span>讨论 agent 正在思考… <span>执行任务不受影响</span></div>
+        <div class="composer-area"><div id="quick-prompts" class="quick-prompts"><button data-prompt="这个插件的执行 agent 和讨论 agent 应该如何分工？">聊聊职责划分</button><button data-prompt="解释一下当前 demo 怎样同步会话，以及它的限制。">看看同步方式</button></div>
+          <form id="composer"><label class="sr-only" for="input">发给讨论 agent 的消息</label><textarea id="input" placeholder="聊聊当前任务，或继续追问…" rows="3" maxlength="6000"></textarea><div class="composer-bottom"><span>Enter 发送 · Shift + Enter 换行</span><button id="send" type="submit" class="primary">发送 <span aria-hidden="true">↑</span></button></div></form>
+          <div class="composer-note"><span>闲聊保留在这里，结论由你决定是否回传。</span><button id="forward" class="text-button">回传 Codex ↗</button></div>
+        </div>
+      </section>
+      <aside class="inbox" aria-label="待处理事项"><div class="section-head"><h2>值得聊一聊 <span id="pending-count" class="counter">0</span></h2><span>不漏掉重要决定</span></div><div id="cards"></div><div id="outbox" class="outbox"></div><p class="inbox-note">建议和问题可以稍后处理。真实决策由执行端在检查点等待；示例决策仅演示界面。</p></aside>
+    </div>
+  </main>
+  <div id="toast" role="status" hidden></div>
+  <dialog id="forward-dialog"><form id="forward-form"><div class="dialog-title"><h2>把结论带回 Codex</h2><button type="button" id="close-dialog" class="quiet" aria-label="关闭">×</button></div><p>写下要执行的明确结论。保存后，Codex 在下一个检查点读取。</p><label for="forward-text">需要回传的内容</label><textarea id="forward-text" rows="5" maxlength="6000" required placeholder="例如：第一版只支持一对一任务绑定，不做任务切换。"></textarea><button class="primary" type="submit">保存到回传队列</button></form></dialog>
+</body>
+</html>
