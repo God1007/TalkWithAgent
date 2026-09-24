@@ -24,7 +24,7 @@ def main():
     else:
         data = {'session': args.session}
         data.update({'ack': args.ids} if args.command == 'ack' else {'text': args.text, 'status': args.status})
-        request = Request(args.url + '/api/bridge', json.dumps(data).encode(), {'Content-Type': 'application/json', 'X-Sidecar': '1'})
+        request = Request(args.url + '/api/bridge', json.dumps(data).encode(), {'Content-Type': 'application/json', 'X-TalkWithAgent': '1'})
         with urlopen(request, timeout=10) as response:
             state = json.load(response)
         print(json.dumps({'session': state['id'], 'version': state['version'], 'status': state['status']}, ensure_ascii=False))

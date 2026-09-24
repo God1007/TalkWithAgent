@@ -1,112 +1,169 @@
 'use strict';
 const $ = s => document.querySelector(s);
-const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let session = new URL(location.href).searchParams.get('session') || localStorage.getItem('sidecar-session');
-let state, version = -1, cardSnapshot = '', locked = false, toastTimer;
-const drafts = new Map();
-const time = value => new Date(value * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
-function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 5000); }
+const escape = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const prefix = 'talkwithagent-';
+let session = new URL(location.href).searchParams.get('session') || localStorage.getItem(prefix+'session') || localStorage.getItem('sidecar-session');
+let state, selected, filter = 'open', locked = false, version = -1, toastTimer;
+const time = v => new Date(v * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
+const kindName = {discussion:'讨论',question:'问题',suggestion:'建议',decision:'待决策'};
+function draftKey(id=selected) { return prefix+'draft-'+session+'-'+id; }
+function toast(text) {
+  $('#toast').textContent = text; $('#toast').hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500);
+}
 async function api(path, body) {
-  const response = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json','X-Sidecar':'1'}, body:JSON.stringify(body), signal:AbortSignal.timeout(10000)} : {signal:AbortSignal.timeout(6000)});
+  const response = await fetch(path, { ...(body ? {method:'POST',headers:{'Content-Type':'application/json','X-TalkWithAgent':'1'},body:JSON.stringify(body)} : {}), signal:AbortSignal.timeout(10000)});
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || '请求没有成功，请重试');
+  if (!response.ok) throw new Error(result.error || '请求失败，请重试');
   return result;
 }
 function bind(id) {
-  session = id; version = -1; cardSnapshot = ''; localStorage.setItem('sidecar-session', id);
-  const url = new URL(location.href); url.searchParams.set('session', id); history.replaceState(null, '', url);
-  $('#input').value = localStorage.getItem('sidecar-draft-' + id) || '';
+  session=id; selected=localStorage.getItem(prefix+'topic-'+id); version=-1;
+  $('#input').value=selected?(localStorage.getItem(draftKey())||''):'';
+  $('#messages').replaceChildren();$('.workspace').classList.remove('detail-open');
+  localStorage.setItem(prefix+'session',id);
+  const url=new URL(location.href);url.searchParams.set('session',id);history.replaceState(null,'',url);
+}
+function selectTopic(id, openDetail=true) {
+  if(selected) localStorage.setItem(draftKey(),$('#input').value);
+  selected=id;localStorage.setItem(prefix+'topic-'+session,id);
+  localStorage.setItem(prefix+'seen-'+session+'-'+id,'1');
+  $('#input').value=localStorage.getItem(draftKey())||'';
+  $('#messages').replaceChildren();
+  if(openDetail) $('.workspace').classList.add('detail-open');
+  renderTopics();renderDetail();
 }
 function render(next) {
-  if (next.id !== session) return;
-  state = next; $('#connection').textContent = '已连接 · 本地保存';
-  $('#send').disabled = state.busy || locked; $('#input').placeholder = state.busy ? '可以先写下下一条，回复结束后发送…' : '聊聊当前任务，或继续追问…';
-  if (state.version === version) return;
-  version = state.version;
-  $('#task-name').textContent = state.title;
-  $('#task-update').textContent = state.events.at(-1)?.text || '执行端尚未同步进展';
-  $('#task-status').textContent = {working:'Codex 执行中',waiting:'Codex 等待决定',completed:'本轮已完成'}[state.status];
-  $('#main-id').textContent = state.main_thread || '尚未绑定主任务';
-  $('#discussion-id').textContent = state.codex_thread || '发送消息后创建，后续持续复用';
-  $('#session-id').textContent = state.id;
-  $('#agent-state').textContent = state.busy ? '正在思考' : state.codex_thread ? 'Codex · 会话已连接' : 'Codex · 发送消息开始讨论';
-  const list = $('#messages'); const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 100;
-  const oldIds = new Set([...list.children].map(n => n.dataset.id));
-  if (list.dataset.session !== session) { list.replaceChildren(); list.dataset.session = session; oldIds.clear(); }
-  state.messages.forEach(msg => {
-    if (oldIds.has(msg.id)) return;
-    const div = document.createElement('div'); div.className = 'message ' + msg.role; div.dataset.id = msg.id;
-    if (['system','error'].includes(msg.role)) div.textContent = msg.text;
-    else div.innerHTML = `<div class="message-label">${msg.role === 'user' ? '' : '<span class="avatar" aria-hidden="true">Ⅲ</span>'}${msg.role === 'user' ? '你' : msg.role === 'welcome' ? 'Sidecar · 欢迎' : '讨论 agent'}<time>${time(msg.time)}</time></div><div class="message-body">${escape(msg.text)}</div>`;
-    list.append(div);
-  });
-  if (nearBottom || !oldIds.size) list.scrollTop = list.scrollHeight;
-  $('#thinking').hidden = !state.busy;
-  $('#quick-prompts').hidden = state.messages.some(m => m.role === 'user');
-  const count = state.cards.filter(c => c.status !== 'resolved').length;
-  $('#pending-count').textContent = count; $('#tab-count').textContent = count;
-  const snapshot = JSON.stringify(state.cards);
-  if (snapshot !== cardSnapshot) {
-    const focusedId = document.activeElement?.id, pos = document.activeElement?.selectionStart;
-    $('#cards').querySelectorAll('textarea').forEach(e => drafts.set(e.id, e.value));
-    $('#cards').innerHTML = state.cards.map(cardHTML).join(''); cardSnapshot = snapshot;
-    const focused = focusedId && document.getElementById(focusedId);
-    if (focused && focused.tagName === 'TEXTAREA') { focused.focus(); focused.setSelectionRange(pos,pos); }
+  if(next.id!==session||next.version<version)return;
+  state=next;$('#connection').textContent='已连接 · 本地保存';
+  if(version===state.version)return;
+  version=state.version;
+  $('#task-name').textContent=state.title;
+  $('#task-status').textContent={working:'执行中',waiting:'等待决定',completed:'本轮完成'}[state.status];
+  const progress=state.events.filter(e=>e.kind==='progress').at(-1);
+  $('#task-update').textContent=progress?.text||'尚无进展';
+  $('#main-id').textContent=state.main_thread||'未绑定';
+  $('#discussion-id').textContent=state.codex_thread||'首次思考时建立';
+  const queued=state.jobs?.length>0;
+  $('#agent-state').textContent=state.codex_available===false?'讨论 agent 未连接':state.busy?'agent 正在思考':queued?'正在准备回复':state.agent_error?'讨论暂时中断':'正在关注任务';
+  $('#agent-note').textContent=state.codex_available===false?'请安装 Codex CLI 并登录，然后重新启动服务。':state.agent_error||(state.busy?'你仍可以发起话题或补充想法。':'有值得讨论的新进展时，我会开启话题。');
+  $('#agent-light').classList.toggle('busy',state.busy);
+  $('#retry').hidden=!state.agent_error;
+  const visible=state.cards.filter(c=>!c.archived);
+  if(!selected || !visible.some(c=>c.id===selected)) {
+    selected=visible.find(c=>c.status==='pending')?.id||visible.at(-1)?.id;
+    $('#input').value=selected?(localStorage.getItem(draftKey())||''):'';
+    $('#messages').replaceChildren();
   }
-  $('#outbox').innerHTML = state.outbox.length ? '<h3>回传记录</h3>' + state.outbox.slice(-5).map(i => `<div class="delivery-item">${escape(i.text)}<small>${i.status === 'received' ? '✓ Codex 已读取' : '已保存 · 等待 Codex 读取'} · ${time(i.time)}</small></div>`).join('') : '';
+  renderTopics();renderDetail();
 }
-function cardHTML(c) {
-  const names = {decision:'待决策',suggestion:'建议',question:'问题'};
-  const labels = {decision:c.demo?'示例交互':'需要你的决定',suggestion:'不阻塞执行',question:'可以稍后回答'};
-  let body = '';
-  if (c.status === 'resolved') body = `<p class="result">${escape(c.answer)}<br>${c.demo ? '✓ 示例已完成' : c.delivery === 'received' ? '✓ Codex 已读取' : '已保存 · 等待 Codex 读取'}</p>`;
-  else if (c.kind === 'decision') body = `<div class="card-buttons"><button data-card="${c.id}" data-value="项目目录">项目目录</button><button data-card="${c.id}" data-value="用户目录">用户目录</button></div><details><summary>先讨论，再决定</summary><p>项目目录便于共享，用户目录适合个人偏好。你也可以在对话里继续追问。</p></details>`;
-  else if (c.kind === 'suggestion') body = `<div class="card-buttons"><button data-card="${c.id}" data-value="采纳">采纳建议</button><button class="secondary" data-card="${c.id}" data-value="不采纳">不采纳</button></div><details><summary>补充说明</summary><form data-card-form="${c.id}" data-prefix="补充："><label class="sr-only" for="card-${c.id}">补充说明</label><textarea id="card-${c.id}" required maxlength="1800" placeholder="说说你的考虑…">${escape(drafts.get('card-'+c.id)||'')}</textarea><button type="submit">提交补充</button></form></details>`;
-  else body = `<form data-card-form="${c.id}"><label class="sr-only" for="card-${c.id}">${escape(c.title)}</label><textarea id="card-${c.id}" required maxlength="1800" placeholder="例如：通常同时推进 2–3 个任务">${escape(drafts.get('card-'+c.id)||'')}</textarea><div class="card-buttons"><button type="submit">回复</button>${c.status === 'deferred' ? '<span class="result">已暂存，随时可答</span>' : `<button class="secondary" type="button" data-card="${c.id}" data-value="稍后">稍后回答</button>`}</div></form>`;
-  return `<article class="card ${c.kind} ${c.status}"><div class="card-kind"><strong>${names[c.kind]}</strong><span>${labels[c.kind]}</span></div><h3>${escape(c.title)}</h3><p>${escape(c.description)}</p>${body}</article>`;
+function renderTopics() {
+  if(!state)return;
+  const topics=state.cards.filter(c=>!c.archived);
+  const open=topics.filter(c=>c.status!=='resolved');
+  $('#topic-count').textContent=open.length;
+  const shown=(filter==='open'?open:topics).slice().sort((a,b)=>(b.created||0)-(a.created||0));
+  $('#topics').innerHTML=shown.length?shown.map(c=>{
+    const unread=c.owner==='agent'&&!localStorage.getItem(prefix+'seen-'+session+'-'+c.id);
+    const status=c.status==='resolved'?(c.delivery==='received'?'Codex 已读取':c.delivery?'等待 Codex 读取':'已结束'):c.status==='deferred'?'稍后继续':c.kind==='discussion'?'讨论中':'等你回应';
+    return '<button class="topic-item '+(selected===c.id?'selected':'')+'" data-topic="'+escape(c.id)+'" aria-current="'+(selected===c.id?'true':'false')+'"><span class="item-meta">'+(c.owner==='agent'?'agent 发起':'你发起')+' · '+kindName[c.kind]+(unread?'<span class="new-dot" aria-label="新话题"></span>':'')+'</span><strong>'+escape(c.title)+'</strong><span class="item-status">'+status+'</span></button>';
+  }).join(''):'<p class="list-empty">'+(state.busy?'agent 正在结合任务进展思考。<br>你也可以先开启一个话题。':'暂时没有待讨论的话题。<br>有想法时，随时发起。')+'</p>';
+}
+function renderDetail() {
+  const topic=state?.cards.find(c=>c.id===selected&&!c.archived);
+  $('#no-topic').hidden=Boolean(topic);$('#topic-content').hidden=!topic;
+  if(!topic)return;
+  $('#topic-title').textContent=topic.title;
+  $('#topic-meta').textContent=(topic.owner==='agent'?'agent 发起':'你发起')+' · '+kindName[topic.kind]+' · '+(topic.created?time(topic.created):'先前的讨论');
+  const list=$('#messages');
+  const atBottom=list.scrollHeight-list.scrollTop-list.clientHeight<90;
+  if(list.dataset.topic!==topic.id){list.replaceChildren();list.dataset.topic=topic.id;}
+  let opening=$('#opening');
+  const openingKey=JSON.stringify({description:topic.description,status:topic.status,answer:topic.answer,options:topic.options,delivery:topic.delivery});
+  if(topic.owner==='agent'&&(!opening||opening.dataset.key!==openingKey)) {
+    const el=document.createElement('article');el.id='opening';el.className='message';el.dataset.key=openingKey;
+    let actions='';
+    if(topic.status!=='resolved') {
+      const options=topic.kind==='suggestion'?['采纳','不采纳']:(topic.options||[]);
+      actions=options.map(v=>'<button '+(topic.kind==='suggestion'?'data-confirm':'data-option')+'="'+escape(v)+'">'+escape(v)+'</button>').join('');
+      actions+='<button class="quiet-option" data-confirm="稍后">稍后再聊</button>';
+      if(topic.kind!=='suggestion')actions+='<small>选择会填入回复框，你可以补充后继续讨论，或明确回传。</small>';
+    } else actions='<small>已确认：'+escape(topic.answer)+'</small>';
+    el.innerHTML='<div class="message-label"><strong>讨论 agent</strong><span>发起这个话题</span></div><div class="message-body">'+escape(topic.description)+'</div><div class="topic-options">'+actions+'</div>'+(topic.source_text?'<details class="topic-source"><summary>为什么现在聊这个</summary><p>'+escape(topic.source_text)+'</p></details>':'');
+    if(opening)opening.replaceWith(el);else list.prepend(el);
+  }
+  const known=new Set([...list.querySelectorAll('[data-id]')].map(e=>e.dataset.id));
+  state.messages.filter(m=>m.topic_id===selected).forEach(m=>{
+    if(known.has(m.id))return;
+    const el=document.createElement('article');el.className='message '+m.role;el.dataset.id=m.id;
+    if(['system','error'].includes(m.role))el.textContent=m.text;
+    else el.innerHTML='<div class="message-label"><strong>'+(m.role==='user'?'你':'讨论 agent')+'</strong><time>'+time(m.time)+'</time></div><div class="message-body">'+escape(m.text)+'</div>';
+    list.append(el);
+  });
+  if(atBottom||!known.size)list.scrollTop=list.scrollHeight;
+  const running=state.busy&&state.active_job?.topic_id===selected;
+  const queued=state.jobs?.some(j=>j.topic_id===selected);
+  $('#thinking').hidden=!running&&!queued;
+  $('#thinking').textContent=running?'agent 正在思考这个话题…':'已排队，agent 会继续回应。';
+  const last=state.outbox.filter(i=>i.topic_id===selected).at(-1);
+  $('#delivery').textContent=last?(last.status==='received'?'✓ Codex 已读取你提交的结论':'结论已保存 · 等待 Codex 在检查点读取'):'';
 }
 async function act(payload) {
-  if (locked) return false;
-  locked = true; $('#send').disabled = true;
-  const key = 'sidecar-retry-' + session;
-  const previous = JSON.parse(localStorage.getItem(key) || 'null');
-  const fingerprint = JSON.stringify(payload);
-  const request = previous?.fingerprint === fingerprint ? previous.request : {...payload, session, request_id:crypto.randomUUID()};
-  localStorage.setItem(key, JSON.stringify({fingerprint,request}));
-  try { const result = await api('/api/action', request); localStorage.removeItem(key); render(result); return true; }
-  catch (err) { toast(err.name === 'TimeoutError' ? '连接超时。内容已保留，重试不会重复提交。' : err.message); return false; }
-  finally { locked = false; $('#send').disabled = Boolean(state?.busy); }
+  if(locked)return null;
+  const target=session;locked=true;$('#send').disabled=true;
+  const key=prefix+'retry-'+target;
+  let previous;try{previous=JSON.parse(localStorage.getItem(key)||'null');}catch{}
+  const signature=JSON.stringify(payload);
+  const request=previous?.signature===signature?previous.request:{...payload,session:target,request_id:crypto.randomUUID()};
+  localStorage.setItem(key,JSON.stringify({signature,request}));
+  try {const result=await api('/api/action',request);localStorage.removeItem(key);render(result);return result.receipts[request.request_id]||{};}
+  catch(e){toast(e.message);return null;}
+  finally{locked=false;$('#send').disabled=false;}
 }
-$('#composer').addEventListener('submit', async event => {
-  event.preventDefault(); const text = $('#input').value.trim(); if (!text || state?.busy) return;
-  if (await act({type:'chat',text})) { $('#input').value = ''; localStorage.removeItem('sidecar-draft-'+session); $('#messages').scrollTop = $('#messages').scrollHeight; }
+function openTopicDialog(){$('#topic-dialog').showModal();$('#new-text').focus();}
+$('#new-topic').onclick=openTopicDialog;$('#empty-new').onclick=openTopicDialog;
+$('#topic-form').onsubmit=async e=>{
+  e.preventDefault();const text=$('#new-text').value.trim();if(!text)return;
+  const receipt=await act({type:'start_topic',text,title:$('#new-title').value.trim()});
+  if(receipt){$('#topic-dialog').close();$('#topic-form').reset();selectTopic(receipt.topic_id);}
+};
+$('#composer').onsubmit=async e=>{
+  e.preventDefault();const text=$('#input').value.trim();const target=selected;if(!text||!target)return;
+  if(await act({type:'chat',topic_id:target,text})){localStorage.removeItem(draftKey(target));if(selected===target)$('#input').value='';}
+};
+$('#input').oninput=()=>localStorage.setItem(draftKey(),$('#input').value);
+$('#input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();$('#composer').requestSubmit();}};
+$('#back').onclick=()=>$('.workspace').classList.remove('detail-open');
+$('#forward').onclick=()=>{$('#forward-text').value=$('#input').value;$('#forward-dialog').showModal();};
+$('#forward-form').onsubmit=async e=>{
+  e.preventDefault();const text=$('#forward-text').value.trim();if(!text)return;
+  const topic=state.cards.find(c=>c.id===selected);
+  const payload=topic.owner==='agent'&&topic.status!=='resolved'?{type:'card',card_id:topic.id,value:topic.kind==='decision'&&!topic.options.includes(text)?'补充：'+text:text}:{type:'forward',topic_id:selected,text};
+  if(await act(payload)){$('#forward-dialog').close();toast('已保存，等待 Codex 读取');}
+};
+$('#retry').onclick=()=>act({type:'retry'});
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('button');if(!b)return;
+  if(b.dataset.topic)selectTopic(b.dataset.topic);
+  if(b.dataset.filter){filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(n=>{n.classList.toggle('active',n===b);n.setAttribute('aria-pressed',String(n===b));});renderTopics();}
+  if(b.dataset.close)document.getElementById(b.dataset.close).close();
+  if(b.dataset.option){$('#input').value=b.dataset.option;localStorage.setItem(draftKey(),b.dataset.option);$('#input').focus();}
+  if(b.dataset.confirm)await act({type:'card',card_id:selected,value:b.dataset.confirm});
 });
-$('#input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {e.preventDefault(); $('#composer').requestSubmit();} });
-$('#input').addEventListener('input', () => localStorage.setItem('sidecar-draft-'+session,$('#input').value));
-document.addEventListener('click', async e => {
-  const button = e.target.closest('button'); if (!button) return;
-  if (button.dataset.prompt) { $('#input').value = button.dataset.prompt; $('#input').focus(); }
-  if (button.dataset.card) await act({type:'card',card_id:button.dataset.card,value:button.dataset.value});
-  if (button.dataset.view) { $('.workspace').dataset.view = button.dataset.view; document.querySelectorAll('[data-view].active').forEach(n=>n.classList.remove('active')); button.classList.add('active'); }
-});
-$('#cards').addEventListener('submit', async e => {e.preventDefault(); const f=e.target; const text=f.querySelector('textarea').value.trim(); if(text) await act({type:'card',card_id:f.dataset.cardForm,value:(f.dataset.prefix||'')+text});});
-$('#demo-card').addEventListener('click', async () => { await act({type:'demo_decision'}); if(innerWidth<=760) document.querySelector('button[data-view=cards]').click(); });
-$('#forward').addEventListener('click', () => { $('#forward-text').value = $('#input').value; $('#forward-dialog').showModal(); });
-$('#close-dialog').addEventListener('click', () => $('#forward-dialog').close());
-$('#forward-form').addEventListener('submit', async e => {e.preventDefault(); const text=$('#forward-text').value.trim(); if(text && await act({type:'forward',text})) {$('#forward-dialog').close();toast('已保存到回传队列，等待 Codex 读取');} });
-async function sessions() { const items=await api('/api/sessions'); $('#history').innerHTML=items.map((s,i)=>`<option value="${s.id}" ${s.id===session?'selected':''}>${new Date(s.created*1000).toLocaleString('zh-CN')} · 讨论 ${items.length-i}</option>`).join('');return items; }
-$('#new-session').addEventListener('click', async () => {if(locked)return;try {const next=await api('/api/sessions',{});bind(next.id);render(next);await sessions();toast('已新建讨论，旧会话保留在关联信息中');}catch(e){toast(e.message);} });
-$('#history').addEventListener('change', async e => {bind(e.target.value);render(await api('/api/state?session='+session));});
-async function poll() {
-  try { if(session) render(await api('/api/state?session='+encodeURIComponent(session))); }
-  catch(e) {$('#connection').textContent='连接中断 · 正在重连';}
-  finally { setTimeout(poll,1200); }
+async function sessions(){
+  const items=await api('/api/sessions');
+  $('#history').innerHTML=items.map((s,i)=>'<option value="'+s.id+'" '+(s.id===session?'selected':'')+'>'+new Date(s.created*1000).toLocaleString('zh-CN')+' · 讨论 '+(items.length-i)+'</option>').join('');
+  return items;
 }
-async function boot() {
-  try {
-    const items = await sessions();
-    if (!items.some(s=>s.id===session)) session=items[0]?.id || (await api('/api/sessions',{})).id;
-    bind(session);render(await api('/api/state?session='+session));await sessions();poll();
-  } catch(e) {$('#connection').textContent='连接中断 · 正在重连';toast('无法连接本地服务，正在重试');setTimeout(boot,3000);}
+$('#history').onchange=async e=>{if(locked)return;bind(e.target.value);try{render(await api('/api/state?session='+session));$('#task-details').open=false;}catch(error){toast(error.message);}};
+async function poll(){
+  try{render(await api('/api/state?session='+encodeURIComponent(session)));}
+  catch{$('#connection').textContent='连接中断，重连中';}
+  finally{setTimeout(poll,1200);}
+}
+async function boot(){
+  try{const items=await sessions();if(!items.some(s=>s.id===session))session=items[0]?.id||(await api('/api/sessions',{})).id;
+    bind(session);render(await api('/api/state?session='+session));await sessions();poll();}
+  catch{$('#connection').textContent='连接中断，重连中';setTimeout(boot,3000);}
 }
 boot();

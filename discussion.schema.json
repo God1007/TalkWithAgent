@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "properties": {
+    "reply": {
+      "type": "string"
+    },
+    "topics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "question",
+              "suggestion",
+              "decision"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "key",
+          "kind",
+          "title",
+          "description",
+          "options"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "reply",
+    "topics"
+  ],
+  "additionalProperties": false
+}

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Local discussion companion. Python stdlib + the installed Codex CLI."""
+"""TalkWithAgent: persistent, two-way topic discussions for a native Codex task."""
 import argparse
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -16,28 +19,53 @@ ROOT = Path(__file__).resolve().parent
 CODEX = shutil.which('codex')
 
 
-def message(state, role, text):
-    state['messages'].append({'id': str(uuid.uuid4()), 'role': role, 'text': text, 'time': time.time()})
+def message(state, role, text, topic_id=None):
+    state['messages'].append({'id': str(uuid.uuid4()), 'role': role, 'text': text,
+                              'topic_id': topic_id, 'time': time.time()})
+    return state['messages'][-1]['id']
 
 
 def event(state, text, kind='progress'):
     state['events'].append({'id': str(uuid.uuid4()), 'text': text, 'kind': kind, 'time': time.time()})
 
 
+def source(state):
+    return next((e for e in reversed(state['events']) if e['kind'] == 'progress'), None)
+
+
 def fresh(main_thread=''):
-    state = {'id': str(uuid.uuid4()), 'version': 0, 'title': '讨论 agent 插件 · 交互 Demo',
-             'created': time.time(), 'status': 'working', 'main_thread': main_thread,
-             'codex_thread': None, 'busy': False, 'messages': [], 'events': [], 'receipts': {}, 'outbox': [],
-             'cards': [
-                 {'id': 'summary', 'kind': 'suggestion', 'title': '只把确认后的结论交给执行 agent',
-                  'description': '取舍和追问留在这里。你明确采纳的建议、决定和补充说明，再回传到 Codex。',
-                  'status': 'pending', 'answer': ''},
-                 {'id': 'workflow', 'kind': 'question', 'title': '你通常会同时推进几个任务？',
-                  'description': '这会影响后续是否需要任务切换。现在的演示只绑定当前 Codex 任务，可以稍后回答。',
-                  'status': 'pending', 'answer': ''}]}
-    event(state, '执行留在 Codex，网页负责讨论。')
-    message(state, 'welcome', '我们在这里把思路聊清楚。\n\n我会结合 Codex 同步过来的任务进展，帮你比较方案、提出建议、补充问题。讨论不会打断执行；需要回传的内容，由你明确提交。')
+    state = {'id': str(uuid.uuid4()), 'version': 0, 'schema_version': 2,
+             'title': '讨论 agent 插件', 'created': time.time(), 'status': 'working',
+             'main_thread': main_thread, 'codex_thread': None, 'busy': False, 'active_job': None,
+             'messages': [], 'events': [], 'receipts': {}, 'outbox': [], 'cards': [], 'jobs': [],
+             'input_revision': 0, 'reviewed_revision': -1, 'review_after': 0,
+             'agent_error': '', 'last_review': None}
+    event(state, '任务已绑定，等待 Codex 同步具体进展。')
     return state
+
+
+def validate_result(result):
+    """Validate model output before it can become actionable UI."""
+    if not isinstance(result, dict) or not isinstance(result.get('reply'), str):
+        raise ValueError('讨论输出格式无效')
+    cards = result.get('topics')
+    if not isinstance(cards, list) or len(cards) > 3 or len(result['reply']) > 12000:
+        raise ValueError('讨论输出长度无效')
+    for card in cards:
+        if not isinstance(card, dict) or card.get('kind') not in ('question', 'suggestion', 'decision'):
+            raise ValueError('话题类型无效')
+        for key, limit in [('key', 100), ('title', 100), ('description', 1800)]:
+            if not isinstance(card.get(key), str) or not 1 <= len(card[key].strip()) <= limit:
+                raise ValueError('话题内容无效')
+        if not re.fullmatch(r'[a-z0-9_-]+', card['key']):
+            raise ValueError('话题标识无效')
+        options = card.get('options')
+        if not isinstance(options, list) or len(options) > 4 or any(
+                not isinstance(x, str) or not x.strip() or len(x) > 160 for x in options):
+            raise ValueError('话题选项无效')
+        if card['kind'] == 'decision' and len(options) < 2:
+            raise ValueError('决策需要至少两个选项')
+    return result
 
 
 class Store:
@@ -53,9 +81,12 @@ class Store:
     def save(self, state):
         state['version'] += 1
         with sqlite3.connect(self.path) as db:
-            db.execute('INSERT OR REPLACE INTO sessions VALUES (?, ?)', (state['id'], json.dumps(state, ensure_ascii=False)))
+            db.execute('INSERT OR REPLACE INTO sessions VALUES (?, ?)',
+                       (state['id'], json.dumps(state, ensure_ascii=False)))
 
     def get(self, sid):
+        if not isinstance(sid, str):
+            raise ValueError('会话编号无效')
         with sqlite3.connect(self.path) as db:
             row = db.execute('SELECT body FROM sessions WHERE id=?', (sid,)).fetchone()
         if not row:
@@ -64,7 +95,8 @@ class Store:
 
     def all(self):
         with sqlite3.connect(self.path) as db:
-            return [json.loads(row[0]) for row in db.execute('SELECT body FROM sessions ORDER BY rowid DESC')]
+            states = [json.loads(row[0]) for row in db.execute('SELECT body FROM sessions')]
+        return sorted(states, key=lambda s: s['created'], reverse=True)
 
     def create(self):
         with self.lock:
@@ -79,10 +111,24 @@ class Store:
     def recover(self):
         with self.lock:
             for state in self.all():
-                if state['busy']:
-                    state['busy'] = False
-                    message(state, 'error', '服务重启，上一条回复未完成。已有讨论已保留，请重新发送你的问题。')
-                    self.save(state)
+                if state.get('schema_version') != 2:
+                    for card in state['cards']:
+                        card['archived'] = True
+                    old_id = 'previous-discussion'
+                    if state['messages']:
+                        state['cards'].append({'id': old_id, 'key': old_id, 'kind': 'discussion',
+                                               'owner': 'user', 'title': '先前的讨论', 'description': '',
+                                               'status': 'resolved', 'answer': '', 'created': state['created']})
+                        for msg in state['messages']:
+                            msg['topic_id'] = old_id
+                    defaults = fresh()
+                    for key in ('jobs', 'active_job', 'input_revision', 'reviewed_revision',
+                                'review_after', 'agent_error', 'last_review'):
+                        state[key] = defaults[key]
+                    state['schema_version'] = 2
+                state['busy'] = False
+                state['active_job'] = None
+                self.save(state)
 
     def action(self, sid, data):
         with self.lock:
@@ -91,120 +137,210 @@ class Store:
             if not isinstance(rid, str) or not 1 <= len(rid) <= 100:
                 raise ValueError('缺少有效消息编号')
             if rid in state['receipts']:
-                return state, False
+                return state
             kind = data.get('type')
-            if kind == 'demo_decision':
-                if not any(c['id'] == 'demo' for c in state['cards']):
-                    state['cards'].insert(0, {'id': 'demo', 'kind': 'decision', 'title': '示例：配置保存在哪里？',
-                                            'description': '体验决策卡。此示例只演示确认流程，不会暂停或修改当前 Codex 任务。',
-                                            'status': 'pending', 'answer': '', 'demo': True})
-            elif kind == 'forward':
-                value = data.get('text', '')
-                if not isinstance(value, str) or not value.strip() or len(value) > 6000:
-                    raise ValueError('请输入需要回传的结论')
-                state['outbox'].append({'id': rid, 'text': value.strip(), 'time': time.time(), 'status': 'pending'})
-                message(state, 'system', '结论已保存到回传队列，等待 Codex 在检查点读取。')
-            elif kind == 'chat':
-                value = data.get('text', '')
+            value = data.get('text', '')
+            if kind in ('chat', 'start_topic', 'forward'):
                 if not isinstance(value, str) or not value.strip() or len(value) > 6000:
                     raise ValueError('请输入 1–6000 字的内容')
-                if state['busy']:
-                    raise ValueError('讨论 agent 正在回复，请等它回复后再发送')
+                value = value.strip()
+            topic_id = data.get('topic_id')
+            topic = next((c for c in state['cards'] if c['id'] == topic_id and not c.get('archived')), None)
+            if kind == 'start_topic':
                 if not CODEX:
-                    raise ValueError('没有找到 Codex CLI，卡片演示仍可使用')
-                message(state, 'user', value.strip())
-                state['busy'] = True
+                    raise ValueError('没有找到 Codex CLI')
+                topic_id = str(uuid.uuid4())
+                title = data.get('title') or value.splitlines()[0][:60]
+                if not isinstance(title, str) or len(title) > 100:
+                    raise ValueError('话题标题过长')
+                state['cards'].append({'id': topic_id, 'key': topic_id, 'kind': 'discussion', 'owner': 'user',
+                                       'title': title, 'description': '', 'status': 'pending',
+                                       'answer': '', 'created': time.time()})
+                mid = message(state, 'user', value, topic_id)
+                state['jobs'].append({'id': rid, 'topic_id': topic_id, 'message_id': mid, 'reason': 'message'})
+            elif kind == 'chat':
+                if not topic or not CODEX:
+                    raise ValueError('请选择一个话题，并确认 Codex CLI 可用')
+                mid = message(state, 'user', value, topic_id)
+                state['jobs'].append({'id': rid, 'topic_id': topic_id, 'message_id': mid, 'reason': 'message'})
+            elif kind == 'retry':
+                if not CODEX:
+                    raise ValueError('没有找到 Codex CLI')
+                failed = state.pop('failed_job', None)
+                if failed and failed.get('topic_id'):
+                    state['jobs'].append({**failed, 'id': rid})
+                else:
+                    state['input_revision'] += 1
+                state['review_after'] = 0
+                state['agent_error'] = ''
+            elif kind == 'forward':
+                if not topic:
+                    raise ValueError('请选择要回传的话题')
+                state['outbox'].append({'id': rid, 'topic_id': topic_id, 'text': value,
+                                        'time': time.time(), 'status': 'pending'})
+                message(state, 'system', '结论已保存，等待 Codex 在检查点读取。', topic_id)
             elif kind == 'card':
                 card = next((c for c in state['cards'] if c['id'] == data.get('card_id')), None)
-                if not card or card['status'] not in ('pending', 'deferred'):
-                    raise ValueError('这条事项已处理，请刷新后查看')
+                if not card or card.get('archived') or card['status'] not in ('pending', 'deferred'):
+                    raise ValueError('这个话题已处理，请刷新后查看')
+                topic_id = card['id']
                 value = data.get('value', '')
                 if not isinstance(value, str) or not value.strip() or len(value) > 2000:
                     raise ValueError('请填写有效回复')
-                if card['kind'] == 'decision' and value not in ('项目目录', '用户目录'):
-                    raise ValueError('请选择一种存储方案')
-                if card['kind'] == 'suggestion' and value not in ('采纳', '不采纳') and not value.startswith('补充：'):
-                    raise ValueError('无效的建议回复')
-                if value == '稍后' and card['kind'] == 'question':
+                if value == '稍后':
                     card['status'] = 'deferred'
-                    event(state, '问题已暂存：' + card['title'], 'discussion')
                 else:
-                    card['status'] = 'resolved'
-                    card['answer'] = value
-                    card['delivery'] = 'demo' if card.get('demo') else 'pending'
-                    if card.get('demo'):
-                        message(state, 'system', f'示例决策已确认：{value}。当前 Codex 任务未受影响。')
-                    else:
-                        card['receipt_id'] = rid
-                        state['outbox'].append({'id': rid, 'text': f'{card["title"]} → {value}', 'time': time.time(), 'status': 'pending'})
-                        message(state, 'system', f'{card["title"]} · {value} · 等待 Codex 读取')
+                    if card['kind'] == 'decision' and value not in card.get('options', []) and not value.startswith('补充：'):
+                        raise ValueError('请选择一种方案，或补充你的方案')
+                    card.update(status='resolved', answer=value, delivery='pending', receipt_id=rid)
+                    state['outbox'].append({'id': rid, 'topic_id': card['id'],
+                                            'text': f'{card["title"]} → {value}',
+                                            'time': time.time(), 'status': 'pending'})
+                    mid = message(state, 'user', value, card['id'])
+                    message(state, 'system', '已保存到回传队列，等待 Codex 读取。', card['id'])
+                    state['jobs'].append({'id': rid, 'topic_id': card['id'], 'message_id': mid, 'reason': 'feedback'})
             else:
                 raise ValueError('不支持的操作')
-            state['receipts'][rid] = {'time': time.time(), 'type': kind}
+            state['receipts'][rid] = {'time': time.time(), 'type': kind, 'topic_id': topic_id}
             self.save(state)
-            return state, kind == 'chat'
+            return state
 
     def bridge(self, sid, data):
         with self.lock:
             state = self.get(sid)
-            if data.get('text'):
-                if not isinstance(data['text'], str) or len(data['text']) > 6000:
-                    raise ValueError('状态消息无效')
-                event(state, data['text'])
-            if 'status' in data:
-                if data['status'] not in ('working', 'waiting', 'completed'):
-                    raise ValueError('无效任务状态')
-                state['status'] = data['status']
+            text = data.get('text', '')
+            if not isinstance(text, str) or len(text) > 6000:
+                raise ValueError('状态消息无效')
+            status = data.get('status', state['status'])
+            if status not in ('working', 'waiting', 'completed'):
+                raise ValueError('无效任务状态')
             ack = data.get('ack', [])
             if not isinstance(ack, list) or any(not isinstance(x, str) for x in ack):
                 raise ValueError('无效回执')
             for item in state['outbox']:
-                if item['id'] in ack and item['status'] == 'pending':
+                if item['id'] in ack:
                     item['status'] = 'received'
-                    event(state, 'Codex 已读取：' + item['text'], 'received')
             for card in state['cards']:
                 if card.get('receipt_id') in ack:
                     card['delivery'] = 'received'
             self.save(state)
-            if data.get('text') or 'status' in data:
-                for sibling in self.all():
-                    if sibling['id'] == sid or sibling['main_thread'] != state['main_thread']:
-                        continue
-                    sibling['status'] = state['status']
-                    if data.get('text'):
-                        event(sibling, data['text'])
-                    self.save(sibling)
+            for sibling in self.all():
+                if sibling['main_thread'] != state['main_thread']:
+                    continue
+                old_source = source(sibling)
+                changed = (text and (not old_source or old_source['text'] != text)) or status != sibling['status']
+                if not changed:
+                    continue
+                sibling['status'] = status
+                if text:
+                    event(sibling, text)
+                sibling['input_revision'] += 1
+                sibling['review_after'] = time.time() + 2
+                self.save(sibling)
+            return self.get(sid)
+
+    def claim(self, sid):
+        with self.lock:
+            state = self.get(sid)
+            if state['busy']:
+                return None
+            if state['jobs']:
+                job = dict(state['jobs'][0])
+            elif state['input_revision'] > state['reviewed_revision'] and time.time() >= state['review_after']:
+                job = {'id': str(uuid.uuid4()), 'topic_id': None, 'reason': 'progress'}
+            else:
+                return None
+            job.update(revision=state['input_revision'], source_id=(source(state) or {}).get('id'))
+            state.update(busy=True, active_job=job, agent_error='')
+            self.save(state)
             return state
 
+    def finish(self, sid, job, result=None, thread_id=None, error=None):
+        if result is not None:
+            validate_result(result)
+        with self.lock:
+            state = self.get(sid)
+            if not state['active_job'] or state['active_job']['id'] != job['id']:
+                return
+            state.update(busy=False, active_job=None, last_review=time.time())
+            if thread_id:
+                state['codex_thread'] = thread_id
+            state['jobs'] = [j for j in state['jobs'] if j['id'] != job['id']]
+            if job['reason'] == 'progress':
+                state['reviewed_revision'] = job['revision']
+            if error:
+                state['agent_error'] = error
+                state['failed_job'] = job
+                if job.get('topic_id'):
+                    message(state, 'error', error, job['topic_id'])
+            else:
+                state.pop('failed_job', None)
+                if job.get('topic_id') and result['reply'].strip():
+                    message(state, 'assistant', result['reply'], job['topic_id'])
+                if job['revision'] == state['input_revision']:
+                    known_keys = {c.get('key') for c in state['cards']}
+                    known_titles = {re.sub(r'\W+', '', c['title']) for c in state['cards']}
+                    open_count = sum(c['status'] == 'pending' and c.get('owner') == 'agent'
+                                     and not c.get('archived') for c in state['cards'])
+                    for card in result['topics']:
+                        title_key = re.sub(r'\W+', '', card['title'])
+                        if card['key'] in known_keys or title_key in known_titles or open_count >= 4:
+                            continue
+                        new = dict(card)
+                        # Only the executor can declare it is waiting for a decision.
+                        if new['kind'] == 'decision' and state['status'] != 'waiting':
+                            new['kind'] = 'question'
+                        new.update(id=str(uuid.uuid4()), owner='agent', status='pending', answer='',
+                                   created=time.time(), source_id=job['source_id'],
+                                   source_text=(source(state) or {}).get('text', ''))
+                        state['cards'].append(new)
+                        known_keys.add(card['key'])
+                        known_titles.add(title_key)
+                        open_count += 1
+            self.save(state)
 
-def discuss(store, sid):
-    """One active CLI turn per discussion, always resume its own stored thread."""
+
+def discuss(store, snapshot):
+    sid, job = snapshot['id'], snapshot['active_job']
+    thread_id = snapshot['codex_thread']
     try:
-        state = store.get(sid)
-        context = {'任务': state['title'], '执行状态': state['status'], '事项': state['cards'],
-                   '最近执行事件': state['events'][-12:], '讨论记录': state['messages'][-20:]}
-        prompt = ('你是 Sidecar 的讨论 agent，用简洁自然的中文和用户讨论任务。你不执行代码，不调用工具，不访问文件或网络。'
-                  '任务执行在原生 Codex 中，网页只负责讨论。你只能看到通过检查点同步到的执行状态，不是自动获取完整主会话。不要声称修改过文件或实时知道未同步进展。'
-                  '你是真实 Codex 讨论会话。依据下方上下文回答最后一条用户消息，不复述协议。'
-                  '选择方案必须通过网页决策卡提交，你不能自行把聊天意向视为批准。'
-                  '项目目录便于版本控制与团队共享；用户目录适合个人偏好。建议可不采纳，问题可稍后回答。'
-                  '你可以正常自由讨论。需要执行的结论让用户用“回传 Codex”提交。已保存到回传队列不等于执行端已读取，也不代表已执行。'
-                  '避免长篇，通常 2–4 句即可。\n当前上下文：\n' + json.dumps(context, ensure_ascii=False))
+        context = {'task': snapshot['title'], 'main_status': snapshot['status'], 'trigger': job,
+                   'request': next((m for m in snapshot['messages'] if m['id'] == job.get('message_id')), None),
+                   'topics': [c for c in snapshot['cards'] if not c.get('archived')],
+                   'updates': snapshot['events'][-10:], 'messages': snapshot['messages'][-30:]}
+        prompt = (
+            '你是 TalkWithAgent 的讨论 agent，和用户是平等的讨论伙伴，双方都能主动发起话题。'
+            '你只讨论，不执行代码、不调用工具、不访问文件或网络。执行留在原生 Codex，'
+            '你只能依据提供的同步进展，不假装掌握完整主会话，也不能声称已经执行或暂停主任务。'
+            '输出符合给定 JSON schema。reply 是你对当前话题的简短中文回复；topics 是你主动发起的新话题。'
+            'trigger.reason=progress 时，根据最新进展主动发现值得用户回应的取舍、建议或缺失信息，'
+            '生成 0–2 个具体、简短的新话题，不等用户先说话；没有新的有价值问题就返回空 topics，避免骚扰。'
+            '用户明确要求已确定的事不要反问；已存在、已回答或稍后的话题不要重提。'
+            'key 是稳定英文语义标识，同一问题始终用同一个 key。每个话题说明为何此时值得讨论，'
+            'description 用自然对话表达，问题须明确提问，options 给 0–3 个短回答候选。'
+            'decision 仅用于 main_status=waiting 且执行端确实声明需要决定的情况，至少给两个选项。'
+            '其余用 question 或 suggestion。不得自行将执行端改成等待状态。'
+            'trigger.reason=message/feedback 时，回应 trigger.topic_id 内 request 指定的消息，'
+            '必要时追问，或基于新发现开新话题；不要重复用户已确认的答案。'
+            '不要在 reply 中替代可交互的新话题：主动新问题必须放入 topics。'
+            '用户回答、采纳或明确提交的结论才回传执行端；聊天本身不等于执行授权。'
+            '全部用中文纯文本，reply 通常 2–4 句。上下文：\n' + json.dumps(context, ensure_ascii=False))
         cmd = [CODEX, 'exec']
-        if state['codex_thread']:
-            cmd += ['resume', state['codex_thread']]
+        if thread_id:
+            cmd += ['resume', thread_id]
         cmd += ['--ignore-user-config', '--skip-git-repo-check', '--json',
+                '--output-schema', str(ROOT / 'discussion.schema.json'),
                 '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"', '-']
-        # ponytail: one subprocess per reply; keep app-server alive if startup latency matters.
+        # ponytail: one CLI process per turn; a resident app-server can reduce startup cost later.
         with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, cwd=store.directory, start_new_session=True) as process:
             try:
-                output, errors = process.communicate(prompt, timeout=150)
+                output, _ = process.communicate(prompt, timeout=150)
             except subprocess.TimeoutExpired:
-                process.kill()
+                os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
-                raise RuntimeError('Codex 回复超时。讨论已保存，可以稍后重试。')
-        answer, thread_id = '', state['codex_thread']
+                raise RuntimeError('这次思考超时了，内容已保留。可以点击重新思考。')
+        answer = ''
         for line in output.splitlines():
             try:
                 item = json.loads(line)
@@ -213,22 +349,24 @@ def discuss(store, sid):
             if item.get('type') == 'thread.started':
                 thread_id = item.get('thread_id') or thread_id
             if item.get('type') == 'item.completed' and item.get('item', {}).get('type') == 'agent_message':
-                answer = item['item'].get('text', answer)
-        with store.lock:
-            state = store.get(sid)
-            state['codex_thread'] = thread_id
-            state['busy'] = False
-            if process.returncode != 0 or not answer:
-                message(state, 'error', 'Codex 这次没有成功回复。请检查本机 Codex 登录与可用额度后重试；你的消息已经保存。')
-            else:
-                message(state, 'assistant', answer)
-            store.save(state)
+                answer = item['item'].get('text', '')
+        if process.returncode or not answer:
+            raise RuntimeError('讨论 agent 暂时没有回复，请检查 Codex 登录与额度后重试。')
+        store.finish(sid, job, json.loads(answer), thread_id)
     except Exception as error:
-        with store.lock:
-            state = store.get(sid)
-            state['busy'] = False
-            message(state, 'error', str(error) if isinstance(error, RuntimeError) else '讨论服务暂时不可用，你的消息已经保存。')
-            store.save(state)
+        text = str(error) if isinstance(error, RuntimeError) else '这次讨论没有完成，已有内容已保留。请重新思考或继续回复。'
+        store.finish(sid, job, thread_id=thread_id, error=text)
+
+
+def run_worker(store, stop):
+    # ponytail: scan local sessions; use a work queue if session count makes polling costly.
+    while not stop.wait(0.5):
+        if not CODEX:
+            continue
+        for state in store.all():
+            claimed = store.claim(state['id'])
+            if claimed:
+                threading.Thread(target=discuss, args=(store, claimed), daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -245,12 +383,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'self'")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def safe_origin(self):
-        hosts = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
         host = self.headers.get('Host', '')
-        return host in hosts and self.headers.get('Origin', f'http://{host}') == f'http://{host}'
+        return host in {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'} and self.headers.get('Origin', f'http://{host}') == f'http://{host}'
 
     def do_GET(self):
         if not self.safe_origin():
@@ -262,19 +402,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, (ROOT / name).read_bytes(), mime + '; charset=utf-8')
         if parsed.path == '/api/state':
             try:
-                sid = parse_qs(parsed.query).get('session', [''])[0]
-                state = self.server.store.get(sid)
+                state = self.server.store.get(parse_qs(parsed.query).get('session', [''])[0])
                 state['codex_available'] = bool(CODEX)
                 return self.send(200, state)
             except ValueError as error:
                 return self.send(404, {'error': str(error)})
         if parsed.path == '/api/sessions':
-            states = self.server.store.all()
-            return self.send(200, [{'id': s['id'], 'title': s['title'], 'created': s['created']} for s in states])
-        return self.send(404, {'error': '找不到页面'})
+            return self.send(200, [{'id': s['id'], 'title': s['title'], 'created': s['created']}
+                                  for s in self.server.store.all()])
+        self.send(404, {'error': '找不到页面'})
 
     def do_POST(self):
-        if not self.safe_origin() or self.headers.get('X-Sidecar') != '1' or self.headers.get('Content-Type') != 'application/json':
+        if not self.safe_origin() or self.headers.get('X-TalkWithAgent') != '1' or self.headers.get('Content-Type') != 'application/json':
             return self.send(403, {'error': '请求来源无效'})
         try:
             length = int(self.headers.get('Content-Length', '0'))
@@ -286,16 +425,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/sessions':
                 return self.send(201, self.server.store.create())
             if self.path == '/api/action':
-                sid = data.get('session', '')
-                if not isinstance(sid, str):
-                    raise ValueError('会话编号无效')
-                state, run = self.server.store.action(sid, data)
-                self.send(200, state)
-                if run:
-                    threading.Thread(target=discuss, args=(self.server.store, sid), daemon=True).start()
-                return
+                return self.send(200, self.server.store.action(data.get('session'), data))
             if self.path == '/api/bridge':
-                return self.send(200, self.server.store.bridge(data.get('session', ''), data))
+                return self.send(200, self.server.store.bridge(data.get('session'), data))
             self.send(404, {'error': '找不到接口'})
         except (ValueError, TypeError) as error:
             self.send(400, {'error': str(error)})
@@ -313,8 +445,14 @@ def main():
         store.create()
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.store = store
-    print(f'Sidecar ready: http://127.0.0.1:{args.port}', flush=True)
-    server.serve_forever()
+    stop = threading.Event()
+    threading.Thread(target=run_worker, args=(store, stop), daemon=True).start()
+    print(f'TalkWithAgent ready: http://127.0.0.1:{args.port}', flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        stop.set()
+        server.server_close()
 
 
 if __name__ == '__main__':
