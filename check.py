@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Run: python3 check.py. No network or model calls."""
 import tempfile
+import json
+from pathlib import Path
 from unittest.mock import patch
-from server import Store, validate_result, discussion_context, event, message, source
+from server import Store, validate_result, discussion_context, discuss, event, message, source
+from settings import init_config, load_config
 
 def proposal(key='topic', kind='question'):
     return {'reply': '', 'topics': [{'key': key, 'kind': kind, 'title': key,
@@ -125,4 +128,63 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
             pass
         else:
             raise AssertionError('Malformed model output must be rejected')
+
+with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
+    path = Path(directory) / 'config.json'
+    init_config(path)
+    assert load_config(path)['data_dir'] == str((Path(directory) / 'data').resolve())
+    path.write_text(json.dumps({'port': 9001, 'auto_discuss': False, 'max_open_topics': 1}), encoding='utf-8')
+    options = load_config(path, {'port': 9002})
+    assert options['port'] == 9002 and options['auto_discuss'] is False
+    try:
+        init_config(path)
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError('init must never overwrite existing configuration')
+    for bad in [{'port': True}, {'auto_discuss': 'false'}, {'max_open_topics': 0}, {'typo': 1}]:
+        path.write_text(json.dumps(bad), encoding='utf-8')
+        try:
+            load_config(path)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid config must fail clearly')
+    store = Store(Path(directory) / 'sessions', settings=options)
+    unbound = store.create()
+    store.settings['auto_discuss'] = True
+    assert store.claim(unbound['id']) is None, 'Starting an unbound service must not spend model calls'
+    store.settings['auto_discuss'] = False
+    first = store.attach('task-a', 'Task A')
+    second = store.attach('task-b', 'Task B')
+    assert store.attach('task-a', 'Updated title')['id'] == first['id']
+    assert first['id'] != second['id']
+    assert store.claim(first['id']) is None, 'Disabled proactivity must not start model calls'
+    store.action(first['id'], {'type': 'start_topic', 'request_id': 'input', 'text': 'A question'})
+    job = claim(store, first['id'])
+    result = proposal('should-not-appear')
+    result['reply'] = 'A useful reply'
+    store.finish(first['id'], job, result)
+    assert len(store.get(first['id'])['cards']) == 1, 'Auto-discuss off still allows user topics but not unsolicited ones'
+    assert store.get(first['id'])['messages'][-1]['text'] == 'A useful reply'
+    store.settings['auto_discuss'] = True
+    job = claim(store, first['id'])
+    result = proposal('first')
+    result['topics'] += proposal('second')['topics']
+    store.finish(first['id'], job, result)
+    assert sum(c.get('owner') == 'agent' for c in store.get(first['id'])['cards']) == 1
+    assert not store.get(second['id'])['cards'], 'Separate native tasks must not share topics'
+    store.settings.update(model='configured-model', discussion_timeout=23)
+    store.action(first['id'], {'type': 'chat', 'topic_id': store.get(first['id'])['cards'][0]['id'],
+                              'request_id': 'model-config', 'text': 'Another question'})
+    with patch('server.subprocess.Popen') as run:
+        process = run.return_value.__enter__.return_value
+        process.returncode = 0
+        process.communicate.return_value = (json.dumps({'type': 'item.completed', 'item': {
+            'type': 'agent_message', 'text': json.dumps({'reply': 'Configured reply', 'topics': []})}}), '')
+        discuss(store, store.claim(first['id']))
+        command = run.call_args.args[0]
+        assert command[command.index('--model') + 1] == 'configured-model'
+        assert process.communicate.call_args.kwargs['timeout'] == 23
+        assert store.get(first['id'])['messages'][-1]['text'] == 'Configured reply'
 print('PASS: two-way topics, proactive triggers, completion silence, archived context isolation, deduplication, handoff, retries and persistence')

@@ -1,0 +1,21 @@
+{
+  "name": "talkwithagent",
+  "version": "0.1.0",
+  "description": "Keep Codex task execution connected to persistent web discussions.",
+  "author": {
+    "name": "God1007"
+  },
+  "repository": "https://github.com/God1007/TalkWithAgent",
+  "homepage": "https://github.com/God1007/TalkWithAgent",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "TalkWithAgent",
+    "shortDescription": "Discuss tasks in the web while Codex executes.",
+    "longDescription": "Connect a Codex task to TalkWithAgent, publish progress, and collect confirmed feedback at checkpoints. Requires the TalkWithAgent npm command, Python 3.10+, and a signed-in Codex CLI.",
+    "developerName": "God1007",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Connect this task to TalkWithAgent.",
+    "brandColor": "#2C5546"
+  }
+}

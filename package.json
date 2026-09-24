@@ -1,0 +1,21 @@
+{
+  "name": "talkwithagent",
+  "version": "0.1.0",
+  "description": "Persistent web discussions alongside native Codex tasks.",
+  "license": "UNLICENSED",
+  "author": "God1007",
+  "repository": {"type": "git", "url": "https://github.com/God1007/TalkWithAgent.git"},
+  "homepage": "https://github.com/God1007/TalkWithAgent#readme",
+  "engines": {"node": ">=18"},
+  "bin": {"talkwithagent": "bin/talkwithagent.mjs"},
+  "files": [
+    "bin/", "cli.py", "settings.py", "server.py", "bridge.py", "discussion.schema.json",
+    "index.html", "app.js", "style.css", "plugins/", ".agents/plugins/marketplace.json"
+  ],
+  "scripts": {
+    "start": "node bin/talkwithagent.mjs start",
+    "test": "python3 check.py && node --check app.js && node --check bin/talkwithagent.mjs"
+  },
+  "keywords": ["codex", "agent", "discussion", "plugin"],
+  "publishConfig": {"access": "public", "registry": "https://registry.npmjs.org"}
+}

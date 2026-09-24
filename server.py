@@ -14,6 +14,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+from settings import DEFAULTS, load_config
 
 ROOT = Path(__file__).resolve().parent
 CODEX = shutil.which('codex')
@@ -40,7 +41,7 @@ def fresh(main_thread=''):
              'messages': [], 'events': [], 'receipts': {}, 'outbox': [], 'cards': [], 'jobs': [],
              'input_revision': 0, 'reviewed_revision': -1, 'review_after': 0,
              'agent_error': '', 'last_review': None}
-    event(state, '任务已绑定，等待 Codex 同步具体进展。')
+    event(state, '等待 Codex 同步任务进展。' if main_thread else '等待关联 Codex 任务。')
     return state
 
 
@@ -69,12 +70,13 @@ def validate_result(result):
 
 
 class Store:
-    def __init__(self, directory, main_thread=''):
+    def __init__(self, directory, main_thread='', settings=None):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / 'sessions.sqlite3'
         self.lock = threading.RLock()
         self.main_thread = main_thread
+        self.settings = {**DEFAULTS, **(settings or {})}
         with sqlite3.connect(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, body TEXT NOT NULL)')
 
@@ -98,16 +100,32 @@ class Store:
             states = [json.loads(row[0]) for row in db.execute('SELECT body FROM sessions')]
         return sorted(states, key=lambda s: s['created'], reverse=True)
 
-    def create(self):
+    def create(self, main_thread=None, title=None):
         with self.lock:
-            state = fresh(self.main_thread)
-            previous = next((s for s in self.all() if s['main_thread'] == self.main_thread), None)
+            state = fresh(self.main_thread if main_thread is None else main_thread)
+            previous = next((s for s in self.all() if s['main_thread'] == state['main_thread']), None)
             if previous:
                 state['title'] = previous['title']
                 state['status'] = previous['status']
                 state['events'] = [e for e in previous['events'] if e['kind'] == 'progress' and not e.get('archived')]
+            if title:
+                state['title'] = title
             self.save(state)
             return state
+
+    def attach(self, main_thread, title):
+        if not isinstance(main_thread, str) or not main_thread.strip() or len(main_thread) > 200:
+            raise ValueError('请提供有效的 Codex 任务 ID')
+        if title is not None and (not isinstance(title, str) or not title.strip() or len(title) > 100):
+            raise ValueError('任务名称需要 1–100 字')
+        with self.lock:
+            existing = next((s for s in self.all() if s['main_thread'] == main_thread), None)
+            if existing:
+                if title:
+                    existing['title'] = title.strip()
+                    self.save(existing)
+                return existing
+            return self.create(main_thread, title.strip() if title else None)
 
     def recover(self):
         with self.lock:
@@ -247,7 +265,8 @@ class Store:
                 return None
             if state['jobs']:
                 job = dict(state['jobs'][0])
-            elif (state['status'] != 'completed' and state['input_revision'] > state['reviewed_revision']
+            elif (self.settings['auto_discuss'] and state['main_thread'] and state['status'] != 'completed'
+                  and state['input_revision'] > state['reviewed_revision']
                   and time.time() >= state['review_after']):
                 job = {'id': str(uuid.uuid4()), 'topic_id': None, 'reason': 'progress'}
             else:
@@ -279,7 +298,7 @@ class Store:
                 state.pop('failed_job', None)
                 if job.get('topic_id') and result['reply'].strip():
                     message(state, 'assistant', result['reply'], job['topic_id'])
-                if (job['revision'] == state['input_revision']
+                if (self.settings['auto_discuss'] and job['revision'] == state['input_revision']
                         and (job['reason'] != 'progress' or state['status'] != 'completed')):
                     known_keys = {c.get('key') for c in state['cards']}
                     known_titles = {re.sub(r'\W+', '', c['title']) for c in state['cards']}
@@ -287,7 +306,8 @@ class Store:
                                      and not c.get('archived') for c in state['cards'])
                     for card in result['topics']:
                         title_key = re.sub(r'\W+', '', card['title'])
-                        if card['key'] in known_keys or title_key in known_titles or open_count >= 4:
+                        if (card['key'] in known_keys or title_key in known_titles
+                                or open_count >= self.settings['max_open_topics']):
                             continue
                         new = dict(card)
                         # Only the executor can declare it is waiting for a decision.
@@ -317,12 +337,13 @@ def discuss(store, snapshot):
     sid, job = snapshot['id'], snapshot['active_job']
     thread_id = snapshot['codex_thread']
     try:
-        context = discussion_context(snapshot)
+        context = {**discussion_context(snapshot), 'auto_discuss': store.settings['auto_discuss']}
         prompt = (
             '你是 TalkWithAgent 的讨论 agent，和用户是平等的讨论伙伴，双方都能主动发起话题。'
             '你只讨论，不执行代码、不调用工具、不访问文件或网络。执行留在原生 Codex，'
             '你只能依据提供的同步进展，不假装掌握完整主会话，也不能声称已经执行或暂停主任务。'
             '输出符合给定 JSON schema。reply 是你对当前话题的简短中文回复；topics 是你主动发起的新话题。'
+            'auto_discuss=false 时 topics 必须为空，仍然正常回复用户，也可在当前话题内追问。'
             'trigger.reason=progress 时，根据最新进展主动发现值得用户回应的取舍、建议或缺失信息，'
             '生成 0–2 个具体、简短的新话题，不等用户先说话；没有新的有价值问题就返回空 topics，避免骚扰。'
             '每个主动话题必须对应当前任务中具体、尚未解决且用户回答能影响结果的问题。'
@@ -345,6 +366,8 @@ def discuss(store, snapshot):
         cmd = [CODEX, 'exec']
         if thread_id:
             cmd += ['resume', thread_id]
+        if store.settings['model']:
+            cmd += ['--model', store.settings['model']]
         cmd += ['--ignore-user-config', '--skip-git-repo-check', '--json',
                 '--output-schema', str(ROOT / 'discussion.schema.json'),
                 '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"', '-']
@@ -352,9 +375,12 @@ def discuss(store, snapshot):
         with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, cwd=store.directory, start_new_session=True) as process:
             try:
-                output, _ = process.communicate(prompt, timeout=150)
+                output, _ = process.communicate(prompt, timeout=store.settings['discussion_timeout'])
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                if os.name == 'posix':
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
                 process.communicate()
                 raise RuntimeError('这次思考超时了，内容已保留。可以点击重新思考。')
         answer = ''
@@ -421,6 +447,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 state = self.server.store.get(parse_qs(parsed.query).get('session', [''])[0])
                 state['codex_available'] = bool(CODEX)
+                state['auto_discuss'] = self.server.store.settings['auto_discuss']
                 return self.send(200, state)
             except ValueError as error:
                 return self.send(404, {'error': str(error)})
@@ -441,6 +468,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('请求格式无效')
             if self.path == '/api/sessions':
                 return self.send(201, self.server.store.create())
+            if self.path == '/api/attach':
+                return self.send(200, self.server.store.attach(data.get('main_thread'), data.get('title')))
             if self.path == '/api/action':
                 return self.send(200, self.server.store.action(data.get('session'), data))
             if self.path == '/api/bridge':
@@ -450,21 +479,34 @@ class Handler(BaseHTTPRequestHandler):
             self.send(400, {'error': str(error)})
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--data-dir', default=str(ROOT / '.runtime'))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='TalkWithAgent local discussion service')
+    parser.add_argument('--config', help='JSON config file (or TALKWITHAGENT_CONFIG)')
+    parser.add_argument('--port', type=int)
+    parser.add_argument('--data-dir')
+    parser.add_argument('--model')
+    parser.add_argument('--auto-discuss', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--max-open-topics', type=int)
+    parser.add_argument('--discussion-timeout', type=int)
     parser.add_argument('--main-thread', default='')
-    args = parser.parse_args()
-    store = Store(args.data_dir, args.main_thread)
+    args = parser.parse_args(argv)
+    try:
+        settings = load_config(args.config, vars(args))
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
+    try:
+        server = ThreadingHTTPServer(('127.0.0.1', settings['port']), Handler)
+    except OSError as error:
+        parser.exit(1, f'无法启动 TalkWithAgent: {error}\n')
+    store = Store(settings['data_dir'], args.main_thread, settings)
     store.recover()
-    if not store.all():
+    if not store.all() or (args.main_thread and not any(s['main_thread'] == args.main_thread for s in store.all())):
         store.create()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.store = store
     stop = threading.Event()
     threading.Thread(target=run_worker, args=(store, stop), daemon=True).start()
-    print(f'TalkWithAgent ready: http://127.0.0.1:{args.port}', flush=True)
+    print(f'TalkWithAgent ready: http://127.0.0.1:{settings["port"]}', flush=True)
+    print(f'Data: {settings["data_dir"]}', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

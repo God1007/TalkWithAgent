@@ -45,8 +45,8 @@ function render(next) {
   $('#main-id').textContent=state.main_thread||'未绑定';
   $('#discussion-id').textContent=state.codex_thread||'首次思考时建立';
   const queued=state.jobs?.length>0;
-  $('#agent-state').textContent=state.codex_available===false?'讨论 agent 未连接':state.busy?'agent 正在思考':queued?'正在准备回复':state.agent_error?'讨论暂时中断':state.status==='completed'?'随时可以继续讨论':'正在关注任务';
-  $('#agent-note').textContent=state.codex_available===false?'请安装 Codex CLI 并登录，然后重新启动服务。':state.agent_error||(state.busy?'你仍可以发起话题或补充想法。':state.status==='completed'?'已有话题和讨论记录会保留。':'有值得讨论的新进展时，我会开启话题。');
+  $('#agent-state').textContent=state.codex_available===false?'讨论 agent 未连接':state.busy?'agent 正在思考':queued?'正在准备回复':state.agent_error?'讨论暂时中断':state.auto_discuss===false?'主动话题已关闭':state.status==='completed'?'随时可以继续讨论':'正在关注任务';
+  $('#agent-note').textContent=state.codex_available===false?'请安装 Codex CLI 并登录，然后重新启动服务。':state.agent_error||(state.busy?'你仍可以发起话题或补充想法。':state.auto_discuss===false?'你仍可以发起话题和继续讨论。':state.status==='completed'?'已有话题和讨论记录会保留。':'有值得讨论的新进展时，我会开启话题。');
   $('#agent-light').classList.toggle('busy',state.busy);
   $('#retry').hidden=!state.agent_error;
   const visible=state.cards.filter(c=>!c.archived);
