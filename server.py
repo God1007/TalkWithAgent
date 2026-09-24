@@ -69,6 +69,10 @@ class Store:
     def create(self):
         with self.lock:
             state = fresh(self.main_thread)
+            previous = next((s for s in self.all() if s['main_thread'] == self.main_thread), None)
+            if previous:
+                state['status'] = previous['status']
+                state['events'] = [e for e in previous['events'] if e['kind'] == 'progress']
             self.save(state)
             return state
 
@@ -162,6 +166,14 @@ class Store:
                 if card.get('receipt_id') in ack:
                     card['delivery'] = 'received'
             self.save(state)
+            if data.get('text') or 'status' in data:
+                for sibling in self.all():
+                    if sibling['id'] == sid or sibling['main_thread'] != state['main_thread']:
+                        continue
+                    sibling['status'] = state['status']
+                    if data.get('text'):
+                        event(sibling, data['text'])
+                    self.save(sibling)
             return state
 
 

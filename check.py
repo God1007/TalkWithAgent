@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory() as directory:
     state = store.get(sid)
     assert len(state['outbox']) == 1, 'A transport retry must not duplicate the instruction'
     assert state['outbox'][0]['status'] == 'pending', 'Saving is not acknowledgement'
-    store = Store(directory)
+    store = Store(directory, 'main-task')
     assert store.get(sid)['outbox'][0]['text'] == request['text'], 'Restart must preserve the queue'
     store.bridge(sid, {'ack': ['retry-safe'], 'text': '已收到你的决定'})
     assert store.get(sid)['outbox'][0]['status'] == 'received'
@@ -35,5 +35,9 @@ with tempfile.TemporaryDirectory() as directory:
         pass
     second = store.create()['id']
     assert not store.get(second)['outbox'], 'Discussion histories must stay isolated'
+    store.bridge(sid, {'status': 'completed', 'text': '任务完成'})
+    assert store.get(second)['status'] == 'completed', 'Bound discussions must share main task status'
+    third = store.create()['id']
+    assert store.get(third)['status'] == 'completed', 'New discussions must inherit current task status'
     assert store.get(sid)['main_thread'] == 'main-task'
 print('PASS: persistence, idempotency, acknowledgement, non-blocking replies, deferred answers, demo isolation, stale actions, session isolation')
