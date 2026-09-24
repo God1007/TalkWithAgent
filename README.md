@@ -1,6 +1,6 @@
 # TalkWithAgent
 
-任务执行留在 Codex，讨论在网页中。讨论 agent 绑定使用插件的 Codex session，自动读取该会话的用户消息、可见回复与进展；你和 agent 在同一条对话里交流，无需创建话题或重新介绍任务。
+任务执行留在 Codex，讨论在网页中。讨论 agent 绑定使用插件的 Codex session，自动读取该会话的用户消息、可见回复与进展，并能只读查看任务文档、代码和 Git 差异；你和 agent 在同一条对话里交流，无需创建话题或重新介绍任务。
 
 ## 安装
 
@@ -72,6 +72,14 @@ talkwithagent start --data-dir /absolute/path/to/existing-data
 
 所有 agent 自动共享同一个 Codex 主会话的可见文字和执行进展。每个 agent 有独立的持久 Codex thread、聊天记录、草稿和回复队列，可以同时回复；切换页面不会停止其他 agent。名称用于区分，关注方向可选，不需要重复介绍任务。已有讨论自动作为默认 agent 保留。服务的模型和主动提问配置适用于所有 agent。
 
+讨论 agent 默认在主 Codex session 的工作目录中运行，按问题读取相关文档、源码、Git 状态和未提交差异。工作目录和近期修改文件的路径随上下文同步；文件内容按需读取，不依赖主 agent 把正文复制到聊天里。追问文件变化时会重新读取当前版本。网页「会话信息」中显示工作目录。
+
+实际仓库位于其他目录时，关联或重新关联时指定 `--workspace`。该目录应用于同一 session 下的所有讨论 agent，已有聊天与 Codex thread 保留；省略参数会保留已有的显式目录。
+
+```bash
+talkwithagent attach --main-thread <Codex-任务-ID> --workspace /absolute/path/to/repository
+```
+
 ```bash
 talkwithagent attach --main-thread <Codex-任务-ID> --title "当前任务名称"
 talkwithagent publish --session <讨论-session-ID> "已完成接口分析，正在实现页面"
@@ -91,11 +99,13 @@ agent 根据新进展判断是否需要提出问题和建议，直接插入连�
 
 ## 集成边界
 
-主会话到讨论 agent 的同步是自动轮询已持久化的可见文字，不是实时订阅桌面内存，也不包含隐藏推理、工具原文或图片。提供最近最多 120,000 字符，超出时明确标记截断。`publish` 用于补充执行摘要和声明 working / waiting / completed；不再是讨论上下文的唯一来源。
+主会话到讨论 agent 的同步是自动轮询已持久化的可见文字及文件定位信息，不是实时订阅桌面内存，也不包含隐藏推理、工具输出原文或图片。文字提供最近最多 120,000 字符，超出时明确标记截断；另提供最近 20 次文件修改的路径和 10 个命令工作目录。定位信息只说明最近处理过哪些材料，实际内容和差异由讨论 agent 读取本机文件确认。`publish` 用于补充执行摘要和声明 working / waiting / completed；不再是讨论上下文的唯一来源。
 
 网页到主 agent 的读取仍由插件在执行检查点完成，不会在 Codex 任务结束后自动唤醒执行端。数据只读取绑定的 task ID；讨论 agent 只接收该任务的上下文。
 
-讨论 agent 使用独立且持久化的 Codex thread，调用只读 sandbox；它不是桌面任务树中的原生子任务。只有执行端上报 `waiting` 才能生成决策话题，真正暂停与恢复依赖执行 agent 配合。
+讨论 agent 使用独立且持久化的 Codex thread，通过 [Codex CLI 的工作目录与 sandbox 配置](https://learn.chatgpt.com/docs/developer-commands?surface=cli) 启动或恢复到当前任务目录。保留只读 sandbox、禁用审批升级和网页搜索；提示词允许读取任务材料，把修改文件、构建、测试和执行任务留给主 agent。工作目录是定位入口，并不是额外实现的文件读取隔离边界。此能力仅覆盖服务所在机器可访问的本地文件，不会自动获得云文档或远端工作区的权限。
+
+讨论 agent 不是桌面任务树中的原生子任务。只有执行端上报 `waiting` 才能生成决策话题，真正暂停与恢复依赖执行 agent 配合。
 
 服务使用本机 Codex 账户额度。服务只对本机开放，校验 Host、Origin 和自定义请求头，没有多用户认证，不应暴露到公网。会话数据库包含任务内容，不放进发布包。
 
@@ -109,6 +119,6 @@ npm pack
 npm publish --access public
 ```
 
-`npm pack` 生成可分发的 `talkwithagent-0.3.0.tgz`。它包含命令、服务、网页、配置读取代码和 Codex 插件，不包含本地会话数据库。可以通过 `npm install -g /path/to/talkwithagent-0.3.0.tgz` 安装。
+`npm pack` 生成可分发的 `talkwithagent-0.4.0.tgz`。它包含命令、服务、网页、配置读取代码和 Codex 插件，不包含本地会话数据库。可以通过 `npm install -g /path/to/talkwithagent-0.4.0.tgz` 安装。
 
-`npm test` 检查多个 agent 的共享主上下文、独立聊天、并发队列、持久化、反馈汇总、重试和配置。`check_package.py` 在临时目录实际打包、安装和启动服务，验证命令、创建/切换 agent、跨 session 隔离及静态资源，不调用模型。模型与浏览器的交互验证请使用独立数据目录。
+`npm test` 检查多个 agent 的共享主上下文、独立聊天、并发队列、持久化、反馈汇总、重试、只读调用参数、工作目录选择和文件定位信息过滤。`check_package.py` 在临时目录实际打包、安装和启动服务，验证命令、创建/切换 agent、工作目录绑定、跨 session 隔离及静态资源，不调用模型。模型与浏览器的交互验证请使用独立数据目录。

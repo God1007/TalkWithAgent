@@ -40,6 +40,7 @@ def main(argv=None):
         if name == 'attach':
             command.add_argument('--main-thread', default=os.environ.get('CODEX_THREAD_ID'))
             command.add_argument('--title')
+            command.add_argument('--workspace', help='Local task directory (defaults to the bound Codex session directory)')
         if name in ('publish', 'discussion', 'pending', 'ack'):
             command.add_argument('--session', required=True)
         if name == 'publish':
@@ -64,7 +65,8 @@ def main(argv=None):
         elif args.command == 'attach':
             if not args.main_thread:
                 raise ValueError('请通过 --main-thread 提供当前 Codex 任务 ID')
-            state = request(config, '/api/attach', {'main_thread': args.main_thread, 'title': args.title})
+            state = request(config, '/api/attach', {'main_thread': args.main_thread, 'title': args.title,
+                                                   'workspace': str(Path(args.workspace).expanduser().resolve()) if args.workspace else None})
             result = {'session': state['id'], 'url': f'http://127.0.0.1:{config["port"]}/?session={state["id"]}'}
         elif args.command in ('discussion', 'pending'):
             from urllib.parse import urlencode

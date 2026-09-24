@@ -162,7 +162,7 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
     store.settings['auto_discuss'] = True
     assert store.claim(unbound['id']) is None, 'Starting an unbound service must not spend model calls'
     store.settings['auto_discuss'] = False
-    first = store.attach('task-a', 'Task A')
+    first = store.attach('task-a', 'Task A', directory)
     second = store.attach('task-b', 'Task B')
     assert store.attach('task-a', 'Updated title')['id'] == first['id']
     assert first['id'] != second['id']
@@ -192,6 +192,10 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
         discuss(store, store.claim(first['id']))
         command = run.call_args.args[0]
         assert command[command.index('--model') + 1] == 'configured-model'
+        assert command[command.index('--cd') + 1] == str(Path(directory).resolve())
+        assert run.call_args.kwargs['cwd'] == str(Path(directory).resolve())
+        assert 'sandbox_mode="read-only"' in command and 'approval_policy="never"' in command
+        assert 'web_search="disabled"' in command
         assert process.communicate.call_args.kwargs['timeout'] == 23
         assert store.get(first['id'])['messages'][-1]['text'] == 'Configured reply'
 with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
@@ -199,12 +203,16 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
     a, b = store.attach('a', None), store.attach('b', None)
     store.action(a['id'], {'type': 'chat', 'request_id': 'direct', 'text': '主任务的约束是什么？'})
     assert store.claim(a['id']) is None, 'Wait for main context before answering'
-    context = visible_context({'id': 'a', 'turns': [{'id': 't', 'items': [
+    context = visible_context({'id': 'a', 'cwd': directory, 'turns': [{'id': 't', 'items': [
         {'id': 'u', 'type': 'userMessage', 'content': [{'type': 'text', 'text': '离线运行，不使用云服务'}]},
         {'id': 'r', 'type': 'reasoning', 'text': 'must not share'},
-        {'id': 'x', 'type': 'commandExecution', 'aggregatedOutput': 'raw tool output'},
+        {'id': 'x', 'type': 'commandExecution', 'cwd': directory, 'command': 'private arguments', 'aggregatedOutput': 'raw tool output'},
+        {'id': 'f', 'type': 'fileChange', 'status': 'completed', 'changes': [{'path': 'DESIGN.md', 'diff': 'raw file diff'}]},
         {'id': 'm', 'type': 'agentMessage', 'text': '正在实现本地数据库'}]}]})
     assert len(context['messages']) == 2 and not context['truncated']
+    assert context['cwd'] == directory and context['work'] == {
+        'file_changes': [{'status': 'completed', 'paths': ['DESIGN.md']}], 'directories': [directory]}
+    assert not any(text in json.dumps(context) for text in ('private arguments', 'raw tool output', 'raw file diff', 'must not share'))
     store.sync_context(a['id'], context)
     revision = store.get(a['id'])['input_revision']
     store.sync_context(a['id'], context)
@@ -237,7 +245,7 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
     assert not store.get(b['id'])['outbox']
 with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
     store = Store(directory, settings={'auto_discuss': False})
-    first = store.attach('shared-main', 'Shared task')['id']
+    first = store.attach('shared-main', 'Shared task', directory)['id']
     other = store.attach('other-main', 'Unrelated task')['id']
     context = {'thread_id': 'shared-main', 'messages': [{'id': 'requirement', 'role': 'user',
                'text': '只保存在本地'}], 'truncated': False}
@@ -252,6 +260,7 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
     assert store.get(second)['title'] == 'Updated task title'
     assert len(store.agents(other)) == 1
     assert store.get(second)['main_context'] == context, 'New agents inherit the bound session context'
+    assert store.get(second)['workspace_dir'] == str(Path(directory).resolve())
     assert not store.get(second)['messages'] and store.get(second)['codex_thread'] is None
     store.action(second, {'type': 'chat', 'request_id': 'second-chat', 'text': '主任务有什么约束？'})
     one, two = store.claim(first), store.claim(second)
@@ -281,4 +290,44 @@ with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
             pass
         else:
             raise AssertionError('Invalid or duplicate agent configuration must be rejected')
-print('PASS: multiple persistent agents, shared main context, isolated chat, concurrent queues, aggregate feedback and configuration')
+with tempfile.TemporaryDirectory() as directory, patch('server.CODEX', 'codex'):
+    store = Store(Path(directory) / 'data', settings={'auto_discuss': False})
+    root = Path(directory).resolve()
+    old, new = root / 'old', root / 'new'
+    old.mkdir()
+    new.mkdir()
+    first = store.attach('workspace-main', None)['id']
+    second = store.add_agent(first, {'request_id': 'child', 'name': '顾问'})['id']
+    other = store.attach('unrelated', None)['id']
+    store.sync_context(first, {'thread_id': 'workspace-main', 'cwd': str(old), 'messages': []})
+    store.action(first, {'type': 'chat', 'request_id': 'read', 'text': '文档改了什么？'})
+    snapshot = store.claim(first)
+    assert discussion_context(snapshot)['workspace'] == str(old), 'Use the native session directory by default'
+    snapshot['codex_thread'] = 'existing-discussion-thread'
+    store.save(snapshot)
+    store.attach('workspace-main', None, str(new))
+    assert store.get(second)['workspace_dir'] == str(new) and not store.get(other).get('workspace_dir')
+    assert store.attach('workspace-main', None)['workspace_dir'] == str(new), 'Reattachment preserves an explicit directory'
+    with patch('server.subprocess.Popen') as run:
+        process = run.return_value.__enter__.return_value
+        process.returncode = 0
+        process.communicate.return_value = (json.dumps({'type': 'item.completed', 'item': {
+            'type': 'agent_message', 'text': json.dumps({'reply': '已读取', 'topics': []})}}), '')
+        discuss(store, store.get(first))
+        command = run.call_args.args[0]
+        assert command[:6] == ['codex', 'exec', '--cd', str(new), 'resume', 'existing-discussion-thread']
+        assert run.call_args.kwargs['cwd'] == str(new), 'Resume must override the previous runtime directory'
+    for invalid in ('relative', '', str(root / 'missing'), 123):
+        try:
+            store.attach('workspace-main', None, invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid workspace must fail before changing any agent')
+    new.rmdir()
+    store.action(first, {'type': 'chat', 'request_id': 'missing', 'text': '再看一下'})
+    with patch('server.subprocess.Popen') as run:
+        discuss(store, store.claim(first))
+        run.assert_not_called()
+    assert '工作目录' in store.get(first)['agent_error'], 'A missing directory must not silently use runtime storage'
+print('PASS: persistent agents, shared context, read-only workspace, resume directory, isolated chat, queues, feedback and configuration')

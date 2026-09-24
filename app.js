@@ -64,6 +64,7 @@ function render(next) {
   $('#task-update').textContent=mainMessages.filter(m=>m.role==='assistant').at(-1)?.text||state.events.filter(e=>e.kind==='progress'&&!e.archived).at(-1)?.text||'等待任务进展';
   $('#main-id').textContent=state.main_thread||'未绑定';
   $('#discussion-id').textContent=state.codex_thread||'首次回复时建立';
+  $('#workspace-path').textContent=state.workspace_dir||state.main_context?.cwd||'等待主会话同步';
   $('#agent-focus').textContent=state.agent_focus||'共享当前 Codex 会话';
   $('#agent-focus').title=state.agent_focus||'';
   $('#sync-state').textContent=state.context_error?'同步中断':state.context_synced_at?'会话已同步 · '+time(state.context_synced_at):'正在同步会话';

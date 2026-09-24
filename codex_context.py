@@ -7,10 +7,16 @@ import time
 
 
 def visible_context(thread):
-    messages = []
+    messages, changes, directories = [], [], []
     for turn in thread.get('turns', []):
         for item in turn.get('items', []):
             kind = item.get('type')
+            if kind == 'fileChange':
+                changes.append({'status': item.get('status'),
+                                'paths': [c['path'] for c in item.get('changes', []) if isinstance(c.get('path'), str)][:20]})
+            if kind == 'commandExecution' and isinstance(item.get('cwd'), str):
+                cwd = item['cwd']
+                directories = [d for d in directories if d != cwd] + [cwd]
             if kind == 'userMessage':
                 text = '\n'.join(c['text'] for c in item.get('content', []) if c.get('type') == 'text')
             elif kind == 'agentMessage':
@@ -29,7 +35,9 @@ def visible_context(thread):
         text = msg['text'][-120000:]
         kept.append({**msg, 'text': text})
         size += len(text)
-    return {'thread_id': thread['id'], 'messages': list(reversed(kept)),
+    return {'thread_id': thread['id'], 'cwd': thread.get('cwd'),
+            'work': {'file_changes': changes[-20:], 'directories': directories[-10:]},
+            'messages': list(reversed(kept)),
             'truncated': len(kept) < len(messages) or any(len(m['text']) > 120000 for m in messages)}
 
 

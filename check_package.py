@@ -50,7 +50,8 @@ with tempfile.TemporaryDirectory(prefix='talkwithagent-package-') as temporary:
                     time.sleep(0.1)
             else:
                 raise AssertionError('Service did not become ready')
-            attached = json.loads(run(*command, 'attach', '--main-thread', 'first-task', '--title', 'First', env=env))
+            attached = json.loads(run(*command, 'attach', '--main-thread', 'first-task', '--title', 'First',
+                                      '--workspace', str(directory), env=env))
             again = json.loads(run(*command, 'attach', '--main-thread', 'first-task', env=env))
             other = json.loads(run(*command, 'attach', '--main-thread', 'second-task', env=env))
             assert attached['session'] == again['session'] != other['session']
@@ -62,12 +63,14 @@ with tempfile.TemporaryDirectory(prefix='talkwithagent-package-') as temporary:
                 state = json.load(response)
             assert state['status'] == 'completed' and state['auto_discuss'] is False
             assert state['title'] == 'First', 'Reattachment without a title must preserve it'
+            assert state['workspace_dir'] == str(directory.resolve())
             assert not state['busy'] and state['codex_thread'] is None
             data = {'session': attached['session'], 'request_id': 'new-agent', 'name': 'Second agent', 'focus': ''}
             with urlopen(Request(base + '/api/agents', json.dumps(data).encode(),
                                  {'Content-Type': 'application/json', 'X-TalkWithAgent': '1'})) as response:
                 agent = json.load(response)
             assert agent['id'] != attached['session'] and len(agent['agents']) == 2
+            assert agent['workspace_dir'] == state['workspace_dir']
             with urlopen(base + '/api/state?session=' + attached['session'] + '&agent=' + agent['id']) as response:
                 assert json.load(response)['agent_name'] == 'Second agent'
             try:
